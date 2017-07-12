@@ -16,8 +16,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <algorithm>
+#include <float.h>
 
 #include "../MaskedOcclusionCulling.h"
+
+#ifdef _WIN32
+#include <intrin.h>
+#else
+#include <immintrin.h>
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Image utility functions, minimal BMP writer and depth buffer tone mapping

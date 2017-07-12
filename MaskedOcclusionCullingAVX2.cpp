@@ -12,42 +12,28 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and limitations under the License.
  */
-
-#include <new.h>
+#include <stdio.h>
 #include <string.h>
 #include <assert.h>
 #include <float.h>
 #include "MaskedOcclusionCulling.h"
 
-#if !defined(__INTEL_COMPILER) && _MSC_VER < 1900
-	// If you remove/comment this error, the code will compile & use the SSE41 version instead. 
+#ifndef __AVX2__
+	#error For best performance, MaskedOcclusionCullingAVX512.cpp should be compiled with /arch:AVX2
+#endif
+
+#if defined(_MSC_VER) && !defined(__INTEL_COMPILER) && !defined(__clang__) && _MSC_VER < 1900
+	// If you remove/comment this error line, the code will compile & use the SSE41 version instead. 
 	#error Older versions than visual studio 2015 not supported due to compiler bug(s)
 #endif
 
-#if defined(__INTEL_COMPILER) || _MSC_VER >= 1900	// Make sure compiler features AVX2 intrinsics	
+#if defined(__INTEL_COMPILER) || defined(__clang__) || defined(__GNUC__) || _MSC_VER >= 1900 // Make sure compiler features AVX2 & bug workaround for visual studio
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Compiler specific functions: currently only MSC and Intel compiler should work.
+// Compiler specific functions & SIMD math
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#ifdef _MSC_VER
-
-	#include <intrin.h>
-
-	#define FORCE_INLINE __forceinline
-
-	static FORCE_INLINE unsigned long find_clear_lsb(unsigned int *mask)
-	{
-		unsigned long idx;
-		_BitScanForward(&idx, *mask);
-		*mask &= *mask - 1;
-		return idx;
-	}
-
-	#ifndef __AVX2__
-		#error For best performance, MaskedOcclusionCullingAVX2.cpp should be compiled with /arch:AVX2
-	#endif
-#endif
+#include "CompilerSpecificUtilities.inl"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // AVX specific defines and constants
@@ -56,128 +42,70 @@
 #define SIMD_LANES             8
 #define TILE_HEIGHT_SHIFT      3
 
-#define SIMD_LANE_IDX _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)
+#define SIMD_LANE_IDX vec8_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)
 
-#define SIMD_SUB_TILE_COL_OFFSET _mm256_setr_epi32(0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3, 0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3)
-#define SIMD_SUB_TILE_ROW_OFFSET _mm256_setr_epi32(0, 0, 0, 0, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT)
-#define SIMD_SUB_TILE_COL_OFFSET_F _mm256_setr_ps(0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3, 0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3)
-#define SIMD_SUB_TILE_ROW_OFFSET_F _mm256_setr_ps(0, 0, 0, 0, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT)
+#define SIMD_SUB_TILE_COL_OFFSET vec8_setr_epi32(0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3, 0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3)
+#define SIMD_SUB_TILE_ROW_OFFSET vec8_setr_epi32(0, 0, 0, 0, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT)
+#define SIMD_SUB_TILE_COL_OFFSET_F vec8_setr_ps(0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3, 0, SUB_TILE_WIDTH, SUB_TILE_WIDTH * 2, SUB_TILE_WIDTH * 3)
+#define SIMD_SUB_TILE_ROW_OFFSET_F vec8_setr_ps(0, 0, 0, 0, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT, SUB_TILE_HEIGHT)
 
-#define SIMD_SHUFFLE_SCANLINE_TO_SUBTILES _mm256_setr_epi8( 0x0, 0x4, 0x8, 0xC,	0x1, 0x5, 0x9, 0xD,	0x2, 0x6, 0xA, 0xE,	0x3, 0x7, 0xB, 0xF,	0x0, 0x4, 0x8, 0xC,	0x1, 0x5, 0x9, 0xD,	0x2, 0x6, 0xA, 0xE,	0x3, 0x7, 0xB, 0xF)
+#define SIMD_SHUFFLE_SCANLINE_TO_SUBTILES vec8_setr_epi8( 0x0, 0x4, 0x8, 0xC, 0x1, 0x5, 0x9, 0xD, 0x2, 0x6, 0xA, 0xE, 0x3, 0x7, 0xB, 0xF, 0x0, 0x4, 0x8, 0xC, 0x1, 0x5, 0x9, 0xD, 0x2, 0x6, 0xA, 0xE, 0x3, 0x7, 0xB, 0xF)
 
-#define SIMD_LANE_YCOORD_I _mm256_setr_epi32(128, 384, 640, 896, 1152, 1408, 1664, 1920)
-#define SIMD_LANE_YCOORD_F _mm256_setr_ps(128.0f, 384.0f, 640.0f, 896.0f, 1152.0f, 1408.0f, 1664.0f, 1920.0f)
+#define SIMD_LANE_YCOORD_I vec8_setr_epi32(128, 384, 640, 896, 1152, 1408, 1664, 1920)
+#define SIMD_LANE_YCOORD_F vec8_setr_ps(128.0f, 384.0f, 640.0f, 896.0f, 1152.0f, 1408.0f, 1664.0f, 1920.0f)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // AVX specific typedefs and functions
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-typedef __m256 __mw;
-typedef __m256i __mwi;
+typedef vec8f vecNf;
+typedef vec8i vecNi;
 
 #define mw_f32 m256_f32
 #define mw_i32 m256i_i32
 
-#define _mmw_set1_ps _mm256_set1_ps
-#define _mmw_setzero_ps _mm256_setzero_ps
-#define _mmw_andnot_ps _mm256_andnot_ps
-#define _mmw_fmadd_ps _mm256_fmadd_ps
-#define _mmw_fmsub_ps _mm256_fmsub_ps
-#define _mmw_min_ps _mm256_min_ps
-#define _mmw_max_ps _mm256_max_ps
-#define _mmw_movemask_ps _mm256_movemask_ps
-#define _mmw_blendv_ps _mm256_blendv_ps
-#define _mmw_cmpge_ps(a,b) _mm256_cmp_ps(a, b, _CMP_GE_OQ)
-#define _mmw_cmpgt_ps(a,b) _mm256_cmp_ps(a, b, _CMP_GT_OQ)
-#define _mmw_cmpeq_ps(a,b) _mm256_cmp_ps(a, b, _CMP_EQ_OQ)
-#define _mmw_floor_ps(x) _mm256_round_ps(x, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC)
-#define _mmw_ceil_ps(x) _mm256_round_ps(x, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC)
-#define _mmw_shuffle_ps _mm256_shuffle_ps
-#define _mmw_insertf32x4_ps _mm256_insertf128_ps
+#define vecN_set1_ps vec8_set1_ps
+#define vecN_setzero_ps vec8_setzero_ps
+#define vecN_andnot_ps vec8_andnot_ps
+#define vecN_fmadd_ps vec8_fmadd_ps
+#define vecN_fmsub_ps vec8_fmsub_ps
+#define vecN_min_ps vec8_min_ps
+#define vecN_max_ps vec8_max_ps
+#define vecN_movemask_ps vec8_movemask_ps
+#define vecN_blendv_ps vec8_blendv_ps
+#define vecN_cmpge_ps(a,b) vec8_cmp_ps(a, b, _CMP_GE_OQ)
+#define vecN_cmpgt_ps(a,b) vec8_cmp_ps(a, b, _CMP_GT_OQ)
+#define vecN_cmpeq_ps(a,b) vec8_cmp_ps(a, b, _CMP_EQ_OQ)
+#define vecN_floor_ps(x) vec8_round_ps(x, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC)
+#define vecN_ceil_ps(x) vec8_round_ps(x, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC)
+#define vecN_shuffle_ps vec8_shuffle_ps
+#define vecN_insertf32x4_ps vec8_insertf32x4_ps
 
-#define _mmw_set1_epi32 _mm256_set1_epi32
-#define _mmw_setzero_epi32 _mm256_setzero_si256
-#define _mmw_andnot_epi32 _mm256_andnot_si256
-#define _mmw_min_epi32 _mm256_min_epi32
-#define _mmw_max_epi32 _mm256_max_epi32
-#define _mmw_subs_epu16 _mm256_subs_epu16
-#define _mmw_mullo_epi32 _mm256_mullo_epi32
-#define _mmw_cmpeq_epi32 _mm256_cmpeq_epi32
-#define _mmw_testz_epi32 _mm256_testz_si256
-#define _mmw_cmpgt_epi32 _mm256_cmpgt_epi32
-#define _mmw_srai_epi32 _mm256_srai_epi32
-#define _mmw_srli_epi32 _mm256_srli_epi32
-#define _mmw_slli_epi32 _mm256_slli_epi32
-#define _mmw_sllv_ones(x) _mm256_sllv_epi32(SIMD_BITS_ONE, x)
-#define _mmw_transpose_epi8(x) _mm256_shuffle_epi8(x, SIMD_SHUFFLE_SCANLINE_TO_SUBTILES)
-#define _mmw_abs_epi32 _mm256_abs_epi32
+#define vecN_set1_epi32 vec8_set1_epi32
+#define vecN_setzero_epi32 vec8_setzero_epi32
+#define vecN_andnot_epi32 vec8_andnot_epi32
+#define vecN_min_epi32 vec8_min_epi32
+#define vecN_max_epi32 vec8_max_epi32
+#define vecN_subs_epu16 vec8_subs_epu16
+#define vecN_mullo_epi32 vec8_mullo_epi32
+#define vecN_cmpeq_epi32 vec8_cmpeq_epi32
+#define vecN_testz_epi32 vec8_testz_epi32
+#define vecN_cmpgt_epi32 vec8_cmpgt_epi32
+#define vecN_srai_epi32 vec8_srai_epi32
+#define vecN_srli_epi32 vec8_srli_epi32
+#define vecN_slli_epi32 vec8_slli_epi32
+#define vecN_sllv_ones(x) vec8_sllv_epi32(SIMD_BITS_ONE, x)
+#define vecN_transpose_epi8(x) vec8_shuffle_epi8(x, SIMD_SHUFFLE_SCANLINE_TO_SUBTILES)
+#define vecN_abs_epi32 vec8_abs_epi32
 
-#define _mmw_cvtps_epi32 _mm256_cvtps_epi32
-#define _mmw_cvttps_epi32 _mm256_cvttps_epi32
-#define _mmw_cvtepi32_ps _mm256_cvtepi32_ps
+#define vecN_cvtps_epi32 vec8_cvtps_epi32
+#define vecN_cvttps_epi32 vec8_cvttps_epi32
+#define vecN_cvtepi32_ps vec8_cvtepi32_ps
 
-#define _mmx_dp4_ps(a, b) _mm_dp_ps(a, b, 0xFF)
-#define _mmx_fmadd_ps _mm_fmadd_ps
-#define _mmx_max_epi32 _mm_max_epi32
-#define _mmx_min_epi32 _mm_min_epi32
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// SIMD math operators
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename T, typename Y> FORCE_INLINE T simd_cast(Y A);
-template<> FORCE_INLINE __m128  simd_cast<__m128>(float A) { return _mm_set1_ps(A); }
-template<> FORCE_INLINE __m128  simd_cast<__m128>(__m128i A) { return _mm_castsi128_ps(A); }
-template<> FORCE_INLINE __m128  simd_cast<__m128>(__m128 A) { return A; }
-template<> FORCE_INLINE __m128i simd_cast<__m128i>(int A) { return _mm_set1_epi32(A); }
-template<> FORCE_INLINE __m128i simd_cast<__m128i>(__m128 A) { return _mm_castps_si128(A); }
-template<> FORCE_INLINE __m128i simd_cast<__m128i>(__m128i A) { return A; }
-template<> FORCE_INLINE __m256  simd_cast<__m256>(float A) { return _mm256_set1_ps(A); }
-template<> FORCE_INLINE __m256  simd_cast<__m256>(__m256i A) { return _mm256_castsi256_ps(A); }
-template<> FORCE_INLINE __m256  simd_cast<__m256>(__m256 A) { return A; }
-template<> FORCE_INLINE __m256i simd_cast<__m256i>(int A) { return _mm256_set1_epi32(A); }
-template<> FORCE_INLINE __m256i simd_cast<__m256i>(__m256 A) { return _mm256_castps_si256(A); }
-template<> FORCE_INLINE __m256i simd_cast<__m256i>(__m256i A) { return A; }
-
-// Unary operators
-static FORCE_INLINE __m128  operator-(const __m128  &A) { return _mm_xor_ps(A, _mm_set1_ps(-0.0f)); }
-static FORCE_INLINE __m128i operator-(const __m128i &A) { return _mm_sub_epi32(_mm_set1_epi32(0), A); }
-static FORCE_INLINE __m256  operator-(const __m256  &A) { return _mm256_xor_ps(A, _mm256_set1_ps(-0.0f)); }
-static FORCE_INLINE __m256i operator-(const __m256i &A) { return _mm256_sub_epi32(_mm256_set1_epi32(0), A); }
-static FORCE_INLINE __m128  operator~(const __m128  &A) { return _mm_xor_ps(A, _mm_castsi128_ps(_mm_set1_epi32(~0))); }
-static FORCE_INLINE __m128i operator~(const __m128i &A) { return _mm_xor_si128(A, _mm_set1_epi32(~0)); }
-static FORCE_INLINE __m256  operator~(const __m256  &A) { return _mm256_xor_ps(A, _mm256_castsi256_ps(_mm256_set1_epi32(~0))); }
-static FORCE_INLINE __m256i operator~(const __m256i &A) { return _mm256_xor_si256(A, _mm256_set1_epi32(~0)); }
-static FORCE_INLINE __m256 abs(const __m256 &a) { return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF))); }
-static FORCE_INLINE __m128 abs(const __m128 &a) { return _mm_and_ps(a, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))); }
-
-// Binary operators
-#define SIMD_BINARY_OP(SIMD_TYPE, BASE_TYPE, prefix, postfix, func, op) \
-	static FORCE_INLINE SIMD_TYPE operator##op(const SIMD_TYPE &A, const SIMD_TYPE &B)		{ return _##prefix##_##func##_##postfix(A, B); } \
-	static FORCE_INLINE SIMD_TYPE operator##op(const SIMD_TYPE &A, const BASE_TYPE B)		{ return _##prefix##_##func##_##postfix(A, simd_cast<SIMD_TYPE>(B)); } \
-	static FORCE_INLINE SIMD_TYPE operator##op(const BASE_TYPE &A, const SIMD_TYPE &B)		{ return _##prefix##_##func##_##postfix(simd_cast<SIMD_TYPE>(A), B); } \
-	static FORCE_INLINE SIMD_TYPE &operator##op##=(SIMD_TYPE &A, const SIMD_TYPE &B)		{ return (A = _##prefix##_##func##_##postfix(A, B)); } \
-	static FORCE_INLINE SIMD_TYPE &operator##op##=(SIMD_TYPE &A, const BASE_TYPE B)			{ return (A = _##prefix##_##func##_##postfix(A, simd_cast<SIMD_TYPE>(B))); }
-
-#define ALL_SIMD_BINARY_OP(type_suffix, base_type, postfix, func, op) \
-	SIMD_BINARY_OP(__m128##type_suffix, base_type, mm, postfix, func, op) \
-	SIMD_BINARY_OP(__m256##type_suffix, base_type, mm256, postfix, func, op)
-
-ALL_SIMD_BINARY_OP(, float, ps, add, +)
-ALL_SIMD_BINARY_OP(, float, ps, sub, -)
-ALL_SIMD_BINARY_OP(, float, ps, mul, *)
-ALL_SIMD_BINARY_OP(, float, ps, div, / )
-ALL_SIMD_BINARY_OP(i, int, epi32, add, +)
-ALL_SIMD_BINARY_OP(i, int, epi32, sub, -)
-ALL_SIMD_BINARY_OP(, float, ps, and, &)
-ALL_SIMD_BINARY_OP(, float, ps, or , | )
-ALL_SIMD_BINARY_OP(, float, ps, xor, ^)
-SIMD_BINARY_OP(__m128i, int, mm, si128, and, &)
-SIMD_BINARY_OP(__m128i, int, mm, si128, or , | )
-SIMD_BINARY_OP(__m128i, int, mm, si128, xor, ^)
-SIMD_BINARY_OP(__m256i, int, mm256, si256, and, &)
-SIMD_BINARY_OP(__m256i, int, mm256, si256, or , | )
-SIMD_BINARY_OP(__m256i, int, mm256, si256, xor, ^)
+#define vec4x_dp4_ps(a, b) vec4_dp_ps(a, b, 0xFF)
+#define vec4x_fmadd_ps vec4_fmadd_ps
+#define vec4x_max_epi32 vec4_max_epi32
+#define vec4x_min_epi32 vec4_min_epi32
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Specialized AVX input assembly function for general vertex gather 
@@ -185,54 +113,45 @@ SIMD_BINARY_OP(__m256i, int, mm256, si256, xor, ^)
 
 typedef MaskedOcclusionCulling::VertexLayout VertexLayout;
 
-static FORCE_INLINE void GatherVertices(__m256 *vtxX, __m256 *vtxY, __m256 *vtxW, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
+static FORCE_INLINE void GatherVertices(vec8f *vtxX, vec8f *vtxY, vec8f *vtxW, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
 {
 	assert(numLanes >= 1);
 
-	const __m256i SIMD_TRI_IDX_OFFSET = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
-	static const __m256i SIMD_LANE_MASK[9] = {
-		_mm256_setr_epi32( 0,  0,  0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0,  0,  0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0,  0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0)
+	const vec8i SIMD_TRI_IDX_OFFSET = vec8_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
+	static const vec8i SIMD_LANE_MASK[9] = {
+		vec8_setr_epi32( 0,  0,  0,  0,  0,  0,  0,  0),
+		vec8_setr_epi32(~0,  0,  0,  0,  0,  0,  0,  0),
+		vec8_setr_epi32(~0, ~0,  0,  0,  0,  0,  0,  0),
+		vec8_setr_epi32(~0, ~0, ~0,  0,  0,  0,  0,  0),
+		vec8_setr_epi32(~0, ~0, ~0, ~0,  0,  0,  0,  0),
+		vec8_setr_epi32(~0, ~0, ~0, ~0, ~0,  0,  0,  0),
+		vec8_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0,  0,  0),
+		vec8_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0,  0),
+		vec8_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0)
 	};
 
 	// Compute per-lane index list offset that guards against out of bounds memory accesses
-	__m256i safeTriIdxOffset = _mm256_and_si256(SIMD_TRI_IDX_OFFSET, SIMD_LANE_MASK[numLanes]);
+	vec8i safeTriIdxOffset = SIMD_TRI_IDX_OFFSET & SIMD_LANE_MASK[numLanes];
 
 	// Fetch triangle indices. 
-	__m256i vtxIdx[3];
-	vtxIdx[0] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 0, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
-	vtxIdx[1] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 1, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
-	vtxIdx[2] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 2, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
+	vec8i vtxIdx[3];
+	vtxIdx[0] = vec8_mullo_epi32(vec8_i32gather_epi32((const int*)inTrisPtr + 0, safeTriIdxOffset, 4), vec8_set1_epi32(vtxLayout.mStride));
+	vtxIdx[1] = vec8_mullo_epi32(vec8_i32gather_epi32((const int*)inTrisPtr + 1, safeTriIdxOffset, 4), vec8_set1_epi32(vtxLayout.mStride));
+	vtxIdx[2] = vec8_mullo_epi32(vec8_i32gather_epi32((const int*)inTrisPtr + 2, safeTriIdxOffset, 4), vec8_set1_epi32(vtxLayout.mStride));
 
 	char *vPtr = (char *)inVtx;
 
 	// Fetch triangle vertices
 	for (int i = 0; i < 3; i++)
 	{
-		vtxX[i] = _mm256_i32gather_ps((float *)vPtr, vtxIdx[i], 1);
-		vtxY[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetY), vtxIdx[i], 1);
-		vtxW[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetW), vtxIdx[i], 1);
+		vtxX[i] = vec8_i32gather_ps((float *)vPtr, vtxIdx[i], 1);
+		vtxY[i] = vec8_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetY), vtxIdx[i], 1);
+		vtxW[i] = vec8_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetW), vtxIdx[i], 1);
 	}
 }
 
 namespace MaskedOcclusionCullingAVX2
 {
-	static FORCE_INLINE __m256i _mmw_blendv_epi32(const __m256i &a, const __m256i &b, const __m256i &c) 
-	{
-		return _mm256_castps_si256(_mm256_blendv_ps(_mm256_castsi256_ps(a), _mm256_castsi256_ps(b), _mm256_castsi256_ps(c)));
-	}
-	static FORCE_INLINE __m256i _mmw_blendv_epi32(const __m256i &a, const __m256i &b, const __m256 &c) 
-	{
-		return _mm256_castps_si256(_mm256_blendv_ps(_mm256_castsi256_ps(a), _mm256_castsi256_ps(b), c));
-	}
-
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::AVX2;
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -260,12 +179,12 @@ namespace MaskedOcclusionCullingAVX2
 			AVX2Support = false;
 
 			int nIds, nExIds;
-			__cpuid(cpui, 0);
+			__cpuidex(cpui, 0, 0);
 			nIds = cpui[0];
-			__cpuid(cpui, 0x80000000);
+			__cpuidex(cpui, 0x80000000, 0);
 			nExIds = cpui[0];
 
-			if (nIds >= 7 && nExIds >= 0x80000001)
+			if (nIds >= 7 && nExIds >= (int)0x80000001)
 			{
 				AVX2Support = true;
 
@@ -286,7 +205,7 @@ namespace MaskedOcclusionCullingAVX2
 					AVX2Support = false;
 
 				// Detect AVX2 & AVX512 instruction sets
-				static const unsigned int AVX2_FLAGS = (1 << 3) | (1 << 5) | (1 << 8); // BMI1 (bit manipulation) | BMI2 (bit manipulation)| AVX2
+				static const unsigned int AVX2_FLAGS = (1 << 3) | (1 << 5) | (1 << 8); // BMI1 (bit manipulation) | BMI2 (bit manipulation) | AVX2
 				__cpuidex(cpui, 7, 0);
 				if ((cpui[1] & AVX2_FLAGS) != AVX2_FLAGS)
 					AVX2Support = false;
