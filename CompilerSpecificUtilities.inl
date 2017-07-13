@@ -259,8 +259,8 @@ SIMD_BINARY_OP(vec16i, int, mm512, si512, xor, ^)
 #define vec4_max_ps(A, B)				vec4f(_mm_max_ps((A).native, (B).native))
 #define vec4_fmadd_ps(A, B, C)			vec4f(_mm_fmadd_ps((A).native, (B).native, (C).native))
 #define vec4_fmsub_ps(A, B, C)			vec4f(_mm_fmsub_ps((A).native, (B).native, (C).native))
-#define vec4_shuffle_ps(A, B, C)		vec4f(_mm_shuffle_ps((A).native, (B).native, (C)));
-#define vec4_cvtepi32_ps(A)				vec4f(_mm_cvtepi32_ps((A).native));
+#define vec4_shuffle_ps(A, B, C)		vec4f(_mm_shuffle_ps((A).native, (B).native, (C)))
+#define vec4_cvtepi32_ps(A)				vec4f(_mm_cvtepi32_ps((A).native))
 #define vec4_cmpge_ps(A, B)				vec4f(_mm_cmpge_ps((A).native, (B).native))
 #define vec4_cmpgt_ps(A, B)				vec4f(_mm_cmpgt_ps((A).native, (B).native))
 #define vec4_cmpeq_ps(A, B)				vec4f(_mm_cmpeq_ps((A).native, (B).native))
@@ -314,8 +314,8 @@ SIMD_BINARY_OP(vec16i, int, mm512, si512, xor, ^)
 #define vec8_max_ps(A, B)				vec8f(_mm256_max_ps((A).native, (B).native))
 #define vec8_fmadd_ps(A, B, C)			vec8f(_mm256_fmadd_ps((A).native, (B).native, (C).native))
 #define vec8_fmsub_ps(A, B, C)			vec8f(_mm256_fmsub_ps((A).native, (B).native, (C).native))
-#define vec8_shuffle_ps(A, B, C)		vec8f(_mm256_shuffle_ps((A).native, (B).native, (C)));
-#define vec8_cvtepi32_ps(A)				vec8f(_mm256_cvtepi32_ps((A).native));
+#define vec8_shuffle_ps(A, B, C)		vec8f(_mm256_shuffle_ps((A).native, (B).native, (C)))
+#define vec8_cvtepi32_ps(A)				vec8f(_mm256_cvtepi32_ps((A).native))
 #define vec8_dp_ps(A, B, C)				vec8f(_mm256_dp_ps((A).native, (B).native, (C)))
 #define vec8_insertf32x4_ps(A, B, C)	vec8f(_mm256_insertf128_ps((A).native, (B).native, (C)))
 #define vec8_i32gather_ps(A, B, C)		vec8f(_mm256_i32gather_ps((A), (B).native, (C)))
@@ -360,8 +360,8 @@ SIMD_BINARY_OP(vec16i, int, mm512, si512, xor, ^)
 #define vec16_max_ps(A, B)				vec16f(_mm512_max_ps((A).native, (B).native))
 #define vec16_fmadd_ps(A, B, C)			vec16f(_mm512_fmadd_ps((A).native, (B).native, (C).native))
 #define vec16_fmsub_ps(A, B, C)			vec16f(_mm512_fmsub_ps((A).native, (B).native, (C).native))
-#define vec16_shuffle_ps(A, B, C)		vec16f(_mm512_shuffle_ps((A).native, (B).native, (C)));
-#define vec16_cvtepi32_ps(A)			vec16f(_mm512_cvtepi32_ps((A).native));
+#define vec16_shuffle_ps(A, B, C)		vec16f(_mm512_shuffle_ps((A).native, (B).native, (C)))
+#define vec16_cvtepi32_ps(A)			vec16f(_mm512_cvtepi32_ps((A).native))
 #define vec16_dp_ps(A, B, C)			vec16f(_mm512_dp_ps((A).native, (B).native, (C)))
 #define vec16_insertf32x4_ps(A, B, C)	vec16f(_mm512_insertf32x4((A).native, (B).native, (C)))
 #define vec16_roundscale_ps(A, B)		vec16f(_mm512_roundscale_ps((A).native, B))
