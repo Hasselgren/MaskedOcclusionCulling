@@ -211,6 +211,7 @@ public:
 		struct
 		{
 			long long mNumProcessedRectangles; //!< Number of rects processed (TestRect())
+			long long mNumProcessedSpheres;    //!< Number of spheres processed (TestSphere())
 			long long mNumProcessedTriangles;  //!< Number of ocludee triangles processed (TestTriangles())
 			long long mNumRasterizedTriangles; //!< Number of ocludee triangle passing view frustum and backface culling
 			long long mNumTilesTraversed;      //!< Number of tiles traversed by triangle & rect rasterizers
@@ -339,6 +340,7 @@ public:
 	 *         if the rectangle is outside the view frustum.
 	 */
 	virtual CullingResult TestRect(float xmin, float ymin, float xmax, float ymax, float wmin) const = 0;
+	virtual CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix, BackfaceWinding bfWinding) const = 0;
 
 	/*!
 	 * \brief This function is similar to RenderTriangles(), but performs an occlusion

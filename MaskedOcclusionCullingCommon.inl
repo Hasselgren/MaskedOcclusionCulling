@@ -1603,6 +1603,162 @@ public:
 		return CullingResult::OCCLUDED;
 	}
 
+	void SphereBounds2D(float x, float w, float r, float &xmin, float &xmax) const
+	{
+		float dist = x*x + w*w;
+		float a = -r*x;
+		float b = w*sqrt(dist - r);
+
+		float s0 = (a + b) / dist;
+		float s1 = (a - b) / dist;
+
+		float x0, x1, w0, w1;
+		if (w != 0.0f)
+		{
+			w0 = w + r * (1.0f - s0 * x) / w;
+			w1 = w + r * (1.0f - s1 * x) / w;
+		}
+		else
+		{
+			float d = r * sqrt(1.0f - s0*s0);
+			w0 = w + d;
+			w1 = w - d;
+		}
+		x0 = x + r * s0;
+		x1 = x + r * s1;
+
+		float proj0 = w0 > 0.0f ? x0 / w0 : (x0 < 0.0f ? -FLT_MAX : FLT_MAX);
+		float proj1 = w1 > 0.0f ? x1 / w1 : (x1 < 0.0f ? -FLT_MAX : FLT_MAX);
+		xmin = min(proj0, proj1);
+		xmax = max(proj0, proj1);
+	}
+
+	CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix, BackfaceWinding bfWinding) const override
+	{
+		STATS_ADD(mStats.mOccludees.mNumProcessedSpheres, 1);
+		assert(mMaskedHiZBuffer != nullptr);
+
+		static const __m128i SIMD_TILE_PAD = _mm_setr_epi32(0, TILE_WIDTH, 0, TILE_HEIGHT);
+		static const __m128i SIMD_TILE_PAD_MASK = _mm_setr_epi32(~(TILE_WIDTH - 1), ~(TILE_WIDTH - 1), ~(TILE_HEIGHT - 1), ~(TILE_HEIGHT - 1));
+		static const __m128i SIMD_SUB_TILE_PAD = _mm_setr_epi32(0, SUB_TILE_WIDTH, 0, SUB_TILE_HEIGHT);
+		static const __m128i SIMD_SUB_TILE_PAD_MASK = _mm_setr_epi32(~(SUB_TILE_WIDTH - 1), ~(SUB_TILE_WIDTH - 1), ~(SUB_TILE_HEIGHT - 1), ~(SUB_TILE_HEIGHT - 1));
+
+		//////////////////////////////////////////////////////////////////////////////
+		// Transform sphere origin to clip space
+		//////////////////////////////////////////////////////////////////////////////
+		if (modelToClipMatrix)
+		{
+			__m128 mtxCol0 = _mm_loadu_ps(modelToClipMatrix);
+			__m128 mtxCol1 = _mm_loadu_ps(modelToClipMatrix + 4);
+			__m128 mtxCol2 = _mm_loadu_ps(modelToClipMatrix + 8);
+			__m128 mtxCol3 = _mm_loadu_ps(modelToClipMatrix + 12);
+			__m128 xform = _mmx_fmadd_ps(mtxCol0, _mm_set1_ps(centerX), _mmx_fmadd_ps(mtxCol1, _mm_set1_ps(centerY), _mmx_fmadd_ps(mtxCol2, _mm_set1_ps(centerZW), mtxCol3)));
+			centerX = simd_f32(xform)[0];
+			centerY = simd_f32(xform)[1];
+			centerZW = simd_f32(xform)[3];
+		}
+
+		//////////////////////////////////////////////////////////////////////////////
+		// Compute clip space bounding rectangle (using circle tangent lines)
+		//////////////////////////////////////////////////////////////////////////////
+		float xmin = -FLT_MAX, xmax = FLT_MAX, ymin = -FLT_MAX, ymax = FLT_MAX;
+		if (centerX*centerX + centerY*centerY + centerZW*centerZW - radius*radius > 0.0f)
+		{
+			SphereBounds2D(centerX, centerZW, radius, xmin, xmax);
+			SphereBounds2D(centerY, centerZW, radius, ymin, ymax);
+		}
+		else if (bfWinding == BACKFACE_CCW) // The sphere counts as backface culled if we're inside the circle and cull mode is BACKFACE_CCW.
+			return VIEW_CULLED;
+		float wmin = max(mNearDist, centerZW - radius);
+
+		//////////////////////////////////////////////////////////////////////////////
+		// Compute screen space bounding box and guard for out of bounds
+		//////////////////////////////////////////////////////////////////////////////
+#if USE_D3D != 0
+		__m128  pixelBBox = _mmx_fmadd_ps(_mm_setr_ps(xmin, xmax, ymax, ymin), mIHalfSize, mICenter);
+#else
+		__m128  pixelBBox = _mmx_fmadd_ps(_mm_setr_ps(xmin, xmax, ymin, ymax), mIHalfSize, mICenter);
+#endif
+		__m128i pixelBBoxi = _mm_cvttps_epi32(pixelBBox);
+		pixelBBoxi = _mmx_max_epi32(_mm_setzero_si128(), _mmx_min_epi32(mIScreenSize, pixelBBoxi));
+
+		//////////////////////////////////////////////////////////////////////////////
+		// Pad bounding box to (32xN) tiles. Tile BB is used for looping / traversal
+		//////////////////////////////////////////////////////////////////////////////
+		__m128i tileBBoxi = _mm_and_si128(_mm_add_epi32(pixelBBoxi, SIMD_TILE_PAD), SIMD_TILE_PAD_MASK);
+		int txMin = simd_i32(tileBBoxi)[0] >> TILE_WIDTH_SHIFT;
+		int txMax = simd_i32(tileBBoxi)[1] >> TILE_WIDTH_SHIFT;
+		int tileRowIdx = (simd_i32(tileBBoxi)[2] >> TILE_HEIGHT_SHIFT)*mTilesWidth;
+		int tileRowIdxEnd = (simd_i32(tileBBoxi)[3] >> TILE_HEIGHT_SHIFT)*mTilesWidth;
+
+		if (simd_i32(tileBBoxi)[0] == simd_i32(tileBBoxi)[1] || simd_i32(tileBBoxi)[2] == simd_i32(tileBBoxi)[3])
+			return CullingResult::VIEW_CULLED;
+
+		///////////////////////////////////////////////////////////////////////////////
+		// Pad bounding box to (8x4) subtiles. Skip SIMD lanes outside the subtile BB
+		///////////////////////////////////////////////////////////////////////////////
+		__m128i subTileBBoxi = _mm_and_si128(_mm_add_epi32(pixelBBoxi, SIMD_SUB_TILE_PAD), SIMD_SUB_TILE_PAD_MASK);
+		__mwi stxmin = _mmw_set1_epi32(simd_i32(subTileBBoxi)[0] - 1); // - 1 to be able to use GT test
+		__mwi stymin = _mmw_set1_epi32(simd_i32(subTileBBoxi)[2] - 1); // - 1 to be able to use GT test
+		__mwi stxmax = _mmw_set1_epi32(simd_i32(subTileBBoxi)[1]);
+		__mwi stymax = _mmw_set1_epi32(simd_i32(subTileBBoxi)[3]);
+
+		// Setup pixel coordinates used to discard lanes outside subtile BB
+		__mwi startPixelX = _mmw_add_epi32(SIMD_SUB_TILE_COL_OFFSET, _mmw_set1_epi32(simd_i32(tileBBoxi)[0]));
+		__mwi pixelY = _mmw_add_epi32(SIMD_SUB_TILE_ROW_OFFSET, _mmw_set1_epi32(simd_i32(tileBBoxi)[2]));
+
+		//////////////////////////////////////////////////////////////////////////////
+		// Compute z from w. Note that z is reversed order, 0 = far, 1 = near, which
+		// means we use a greater than test, so zMax is used to test for visibility.
+		//////////////////////////////////////////////////////////////////////////////
+		__mw zMax = _mmw_div_ps(_mmw_set1_ps(1.0f), _mmw_set1_ps(wmin));
+
+		for (;;)
+		{
+			__mwi pixelX = startPixelX;
+			for (int tx = txMin;;)
+			{
+				STATS_ADD(mStats.mOccludees.mNumTilesTraversed, 1);
+
+				int tileIdx = tileRowIdx + tx;
+				assert(tileIdx >= 0 && tileIdx < mTilesWidth*mTilesHeight);
+
+				// Fetch zMin from masked hierarchical Z buffer
+#if QUICK_MASK != 0
+				__mw zBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
+#else
+				__mwi mask = mMaskedHiZBuffer[tileIdx].mMask;
+				__mw zMin0 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[0], mMaskedHiZBuffer[tileIdx].mZMin[1], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_set1_epi32(~0))));
+				__mw zMin1 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[1], mMaskedHiZBuffer[tileIdx].mZMin[0], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_setzero_epi32())));
+				__mw zBuf = _mmw_min_ps(zMin0, zMin1);
+#endif
+				// Perform conservative greater than test against hierarchical Z buffer (zMax >= zBuf means the subtile is visible)
+				__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zMax, zBuf));	//zPass = zMax >= zBuf ? ~0 : 0
+
+																			// Mask out lanes corresponding to subtiles outside the bounding box
+				__mwi bboxTestMin = _mmw_and_epi32(_mmw_cmpgt_epi32(pixelX, stxmin), _mmw_cmpgt_epi32(pixelY, stymin));
+				__mwi bboxTestMax = _mmw_and_epi32(_mmw_cmpgt_epi32(stxmax, pixelX), _mmw_cmpgt_epi32(stymax, pixelY));
+				__mwi boxMask = _mmw_and_epi32(bboxTestMin, bboxTestMax);
+				zPass = _mmw_and_epi32(zPass, boxMask);
+
+				// If not all tiles failed the conservative z test we can immediately terminate the test
+				if (!_mmw_testz_epi32(zPass, zPass))
+					return CullingResult::VISIBLE;
+
+				if (++tx >= txMax)
+					break;
+				pixelX = _mmw_add_epi32(pixelX, _mmw_set1_epi32(TILE_WIDTH));
+			}
+
+			tileRowIdx += mTilesWidth;
+			if (tileRowIdx >= tileRowIdxEnd)
+				break;
+			pixelY = _mmw_add_epi32(pixelY, _mmw_set1_epi32(TILE_HEIGHT));
+		}
+
+		return CullingResult::OCCLUDED;
+	}
+
 	template<bool FAST_GATHER>
 	FORCE_INLINE void BinTriangles(const float *inVtx, const unsigned int *inTris, int nTris, TriList *triLists, unsigned int nBinsW, unsigned int nBinsH, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
 	{
