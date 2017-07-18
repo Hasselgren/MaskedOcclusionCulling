@@ -17,6 +17,7 @@
 #include <string.h>
 #include <assert.h>
 #include <float.h>
+#include <math.h>
 #include "MaskedOcclusionCulling.h"
 #include "CompilerSpecific.inl"
 
