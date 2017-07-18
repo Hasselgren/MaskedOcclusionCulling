@@ -68,6 +68,7 @@ typedef __m512i __mwi;
 #define _mmw_sub_ps                 _mm512_sub_ps
 #define _mmw_mul_ps                 _mm512_mul_ps
 #define _mmw_div_ps                 _mm512_div_ps
+#define _mmw_sqrt_ps                _mm512_sqrt_ps
 #define _mmw_min_ps                 _mm512_min_ps
 #define _mmw_max_ps                 _mm512_max_ps
 #define _mmw_fmadd_ps               _mm512_fmadd_ps

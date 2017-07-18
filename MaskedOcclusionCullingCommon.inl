@@ -501,7 +501,7 @@ public:
 	}
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	// Rasterization functions
+	// Triangle rasterization functions
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	FORCE_INLINE void ComputeBoundingBox(__mwi &bbminX, __mwi &bbminY, __mwi &bbmaxX, __mwi &bbmaxY, const __mw *vX, const __mw *vY, const ScissorRect *scissor)
@@ -1493,10 +1493,6 @@ public:
 		return (CullingResult)RenderTriangles<0, 0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
-	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	// Occlusion query functions
-	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
 	CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
 	{
 		if (vtxLayout.mStride == 16 && vtxLayout.mOffsetY == 4 && vtxLayout.mOffsetW == 12)
@@ -1504,6 +1500,10 @@ public:
 
 		return (CullingResult)RenderTriangles<1, 0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
+
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Rectangle occlusion test
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	CullingResult TestRect(float xmin, float ymin, float xmax, float ymax, float wmin) const override
 	{
@@ -1603,7 +1603,11 @@ public:
 		return CullingResult::OCCLUDED;
 	}
 
-	void SphereBounds2D(float x, float w, float r, float &xmin, float &xmax) const
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Sphere occlusion test
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	FORCE_INLINE void SphereBounds2D(float x, float w, float r, float &xmin, float &xmax) const
 	{
 		float dist = x*x + w*w;
 		float a = -r*x;
@@ -1633,7 +1637,7 @@ public:
 		xmax = max(proj0, proj1);
 	}
 
-	CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix, BackfaceWinding bfWinding) const override
+	CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix) const override
 	{
 		STATS_ADD(mStats.mOccludees.mNumProcessedSpheres, 1);
 		assert(mMaskedHiZBuffer != nullptr);
@@ -1644,7 +1648,7 @@ public:
 		static const __m128i SIMD_SUB_TILE_PAD_MASK = _mm_setr_epi32(~(SUB_TILE_WIDTH - 1), ~(SUB_TILE_WIDTH - 1), ~(SUB_TILE_HEIGHT - 1), ~(SUB_TILE_HEIGHT - 1));
 
 		//////////////////////////////////////////////////////////////////////////////
-		// Transform sphere origin to clip space
+		// Transform sphere origin to clip space and test if camera is inside sphere.
 		//////////////////////////////////////////////////////////////////////////////
 		if (modelToClipMatrix)
 		{
@@ -1659,17 +1663,31 @@ public:
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
+		// Setup sphere-ray intersection and determine if camera is inside sphere
+		//////////////////////////////////////////////////////////////////////////////
+
+		float eqnCx4 = 4.0f*(centerX*centerX + centerY*centerY + centerZW*centerZW - radius*radius);
+		if (eqnCx4 <= 0.0f)
+			return VISIBLE;
+
+		//////////////////////////////////////////////////////////////////////////////
 		// Compute clip space bounding rectangle (using circle tangent lines)
 		//////////////////////////////////////////////////////////////////////////////
 		float xmin = -FLT_MAX, xmax = FLT_MAX, ymin = -FLT_MAX, ymax = FLT_MAX;
-		if (centerX*centerX + centerY*centerY + centerZW*centerZW - radius*radius > 0.0f)
-		{
-			SphereBounds2D(centerX, centerZW, radius, xmin, xmax);
-			SphereBounds2D(centerY, centerZW, radius, ymin, ymax);
-		}
-		else if (bfWinding == BACKFACE_CCW) // The sphere counts as backface culled if we're inside the circle and cull mode is BACKFACE_CCW.
-			return VIEW_CULLED;
-		float wmin = max(mNearDist, centerZW - radius);
+		SphereBounds2D(centerX, centerZW, radius, xmin, xmax);
+		SphereBounds2D(centerY, centerZW, radius, ymin, ymax);
+
+		//////////////////////////////////////////////////////////////////////////////
+		// Project sphere center. The w value will be located in the tile with the
+		// sphere center (maximum if camera is inside the sphere)
+		//////////////////////////////////////////////////////////////////////////////
+
+		float pCenterX = centerX / centerZW;
+		float pCenterY = centerY / centerZW;
+		int ipCenterX = (int)((pCenterX + 1.0f) * 0.5f * (float)mWidth);
+		int ipCenterY = (int)((pCenterY + 1.0f) * 0.5f * (float)mHeight);
+		float wmin = min(mNearDist, centerZW - radius);
+		float wmax = max(mNearDist, centerZW + radius);
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Compute screen space bounding box and guard for out of bounds
@@ -1695,23 +1713,11 @@ public:
 			return CullingResult::VIEW_CULLED;
 
 		///////////////////////////////////////////////////////////////////////////////
-		// Pad bounding box to (8x4) subtiles. Skip SIMD lanes outside the subtile BB
+		// Setup pixel coordinates, used to calculate sphere overlap.
 		///////////////////////////////////////////////////////////////////////////////
-		__m128i subTileBBoxi = _mm_and_si128(_mm_add_epi32(pixelBBoxi, SIMD_SUB_TILE_PAD), SIMD_SUB_TILE_PAD_MASK);
-		__mwi stxmin = _mmw_set1_epi32(simd_i32(subTileBBoxi)[0] - 1); // - 1 to be able to use GT test
-		__mwi stymin = _mmw_set1_epi32(simd_i32(subTileBBoxi)[2] - 1); // - 1 to be able to use GT test
-		__mwi stxmax = _mmw_set1_epi32(simd_i32(subTileBBoxi)[1]);
-		__mwi stymax = _mmw_set1_epi32(simd_i32(subTileBBoxi)[3]);
 
-		// Setup pixel coordinates used to discard lanes outside subtile BB
 		__mwi startPixelX = _mmw_add_epi32(SIMD_SUB_TILE_COL_OFFSET, _mmw_set1_epi32(simd_i32(tileBBoxi)[0]));
 		__mwi pixelY = _mmw_add_epi32(SIMD_SUB_TILE_ROW_OFFSET, _mmw_set1_epi32(simd_i32(tileBBoxi)[2]));
-
-		//////////////////////////////////////////////////////////////////////////////
-		// Compute z from w. Note that z is reversed order, 0 = far, 1 = near, which
-		// means we use a greater than test, so zMax is used to test for visibility.
-		//////////////////////////////////////////////////////////////////////////////
-		__mw zMax = _mmw_div_ps(_mmw_set1_ps(1.0f), _mmw_set1_ps(wmin));
 
 		for (;;)
 		{
@@ -1722,6 +1728,49 @@ public:
 
 				int tileIdx = tileRowIdx + tx;
 				assert(tileIdx >= 0 && tileIdx < mTilesWidth*mTilesHeight);
+
+				///////////////////////////////////////////////////////////////////////////////
+				// Test for overlap with sphere, and compute wMin for each tile
+				///////////////////////////////////////////////////////////////////////////////
+
+				__mwi subtileEndPixelX = _mmw_add_epi32(pixelX, _mmw_set1_epi32(SUB_TILE_WIDTH));
+				__mwi subtileEndPixelY = _mmw_add_epi32(pixelY, _mmw_set1_epi32(SUB_TILE_WIDTH));
+
+				__mwi bestPixelX;
+				bestPixelX = _mmw_blendv_epi32(pixelX, subtileEndPixelX, _mmw_cmpgt_epi32(_mmw_set1_epi32(ipCenterX), subtileEndPixelX));
+				bestPixelX = _mmw_blendv_epi32(_mmw_set1_epi32(ipCenterX), bestPixelX, _mmw_cmpgt_epi32(pixelX, _mmw_set1_epi32(ipCenterX)));
+
+				__mwi bestPixelY;
+				bestPixelY = _mmw_blendv_epi32(pixelY, subtileEndPixelY, _mmw_cmpgt_epi32(_mmw_set1_epi32(ipCenterY), subtileEndPixelY));
+				bestPixelY = _mmw_blendv_epi32(_mmw_set1_epi32(ipCenterY), bestPixelY, _mmw_cmpgt_epi32(pixelY, _mmw_set1_epi32(ipCenterY)));
+
+				// Create a normalized clip space ray direction
+				__mw rayDirX = _mmw_sub_ps(_mmw_div_ps(_mmw_cvtepi32_ps(bestPixelX), mHalfWidth), _mmw_set1_ps(1.0f));
+				__mw rayDirY = _mmw_sub_ps(_mmw_div_ps(_mmw_cvtepi32_ps(bestPixelY), mHalfHeight), _mmw_set1_ps(1.0f));
+
+				__mw eqnA = _mmw_fmadd_ps(rayDirX, rayDirX, _mmw_fmadd_ps(rayDirY, rayDirY, _mmw_set1_ps(1.0f)));
+				__mw eqnB = _mmw_mul_ps(_mmw_set1_ps(2.0f), _mmw_fmadd_ps(rayDirX, _mmw_set1_ps(centerX), _mmw_fmadd_ps(rayDirY, _mmw_set1_ps(centerY), _mmw_set1_ps(centerZW))));
+				__mw discr = _mmw_fmsub_ps(eqnB, eqnB, _mmw_mul_ps(eqnA, _mmw_set1_ps(eqnCx4)));
+				__mw sphereMask = _mmw_cmpge_ps(_mmw_set1_ps(0.0f), discr);
+				
+				__mw zMax = _mmw_div_ps(_mmw_mul_ps(_mmw_set1_ps(2.0f), eqnA), _mmw_sub_ps(eqnB, _mmw_sqrt_ps(discr)));
+
+					////////////////////////////////////////////////////////////////////////////////
+					//// Setup ray-sphere intersection test.
+					////////////////////////////////////////////////////////////////////////////////
+
+					////Vec3f L = center - orig;				// Constant, orig = 0
+					////float a = dir.dotProduct(dir);			// 1 because all rays are normalized
+					////float b = 2 * dir.dotProduct(L);		// <---- Messy term
+					////float c = L.dotProduct(L) - radius2;	// Constant, only depends on sphere
+					////float discr = b * b - 4 * a*c;
+					////float root = sqrt(discr);
+					////float s0 = (b + root) / (2 * a);
+					////float s1 = (b - root) / (2 * a);
+
+				///////////////////////////////////////////////////////////////////////////////
+				// 
+				///////////////////////////////////////////////////////////////////////////////
 
 				// Fetch zMin from masked hierarchical Z buffer
 #if QUICK_MASK != 0
@@ -1735,11 +1784,8 @@ public:
 				// Perform conservative greater than test against hierarchical Z buffer (zMax >= zBuf means the subtile is visible)
 				__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zMax, zBuf));	//zPass = zMax >= zBuf ? ~0 : 0
 
-																			// Mask out lanes corresponding to subtiles outside the bounding box
-				__mwi bboxTestMin = _mmw_and_epi32(_mmw_cmpgt_epi32(pixelX, stxmin), _mmw_cmpgt_epi32(pixelY, stymin));
-				__mwi bboxTestMax = _mmw_and_epi32(_mmw_cmpgt_epi32(stxmax, pixelX), _mmw_cmpgt_epi32(stymax, pixelY));
-				__mwi boxMask = _mmw_and_epi32(bboxTestMin, bboxTestMax);
-				zPass = _mmw_and_epi32(zPass, boxMask);
+				// Mask out lanes corresponding to subtiles outside the bounding box
+				zPass = _mmw_and_epi32(zPass, sphereMask);
 
 				// If not all tiles failed the conservative z test we can immediately terminate the test
 				if (!_mmw_testz_epi32(zPass, zPass))
@@ -1758,6 +1804,10 @@ public:
 
 		return CullingResult::OCCLUDED;
 	}
+
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Binning functions (for multithreading)
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	template<bool FAST_GATHER>
 	FORCE_INLINE void BinTriangles(const float *inVtx, const unsigned int *inTris, int nTris, TriList *triLists, unsigned int nBinsW, unsigned int nBinsH, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)

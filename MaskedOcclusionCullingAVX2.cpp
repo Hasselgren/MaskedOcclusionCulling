@@ -73,6 +73,7 @@ typedef __m256i __mwi;
 #define _mmw_sub_ps                 _mm256_sub_ps
 #define _mmw_mul_ps                 _mm256_mul_ps
 #define _mmw_div_ps                 _mm256_div_ps
+#define _mmw_sqrt_ps                _mm256_sqrt_ps
 #define _mmw_min_ps                 _mm256_min_ps
 #define _mmw_max_ps                 _mm256_max_ps
 #define _mmw_fmadd_ps               _mm256_fmadd_ps

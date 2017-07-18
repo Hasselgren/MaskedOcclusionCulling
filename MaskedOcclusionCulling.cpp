@@ -147,6 +147,7 @@ typedef __m128i __mwi;
 #define _mmw_sub_ps                 _mm_sub_ps
 #define _mmw_mul_ps                 _mm_mul_ps
 #define _mmw_div_ps                 _mm_div_ps
+#define _mmw_sqrt_ps                _mm_sqrt_ps
 #define _mmw_min_ps                 _mm_min_ps
 #define _mmw_max_ps                 _mm_max_ps
 #define _mmw_movemask_ps            _mm_movemask_ps
