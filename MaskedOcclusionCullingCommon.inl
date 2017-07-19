@@ -1605,35 +1605,36 @@ public:
 
 	FORCE_INLINE void SphereBounds2D(float x, float w, float r, float &xmin, float &xmax) const
 	{
-		float dist = x * x + w * w;
-		float a = -r * x;
-		float b = w * sqrtf(dist - r);
+		float nx = -x / r;
+		float nw = -w / r;
+		float xw = nx * nx + nw * nw;
 
-		float s0 = (a + b) / dist;
-		float s1 = (a - b) / dist;
-
-		float x0, x1, w0, w1;
-		if (w != 0.0f)
+		float d = nw * sqrtf(xw - 1.0f);
+		float tx0 = (nx - d) / xw;
+		float tx1 = (nx + d) / xw;
+		float wTangent0, wTangent1;
+		if (nw != 0.0f)
 		{
-			w0 = w + r * (1.0f - s0 * x) / w;
-			w1 = w + r * (1.0f - s1 * x) / w;
+			wTangent0 = w + r * (1.0f - tx0 * nx) / nw;
+			wTangent1 = w + r * (1.0f - tx1 * nx) / nw;
 		}
 		else
 		{
-			float d = r * sqrtf(1.0f - s0*s0);
-			w0 = w + d;
-			w1 = w - d;
+			d = r * sqrtf(1.0f - tx0 * tx0);
+			wTangent0 = w + d;
+			wTangent1 = w - d;
 		}
-		x0 = x + r * s0;
-		x1 = x + r * s1;
+		float xTangent0 = x + r * tx0;
+		float xTangent1 = x + r * tx1;
 
-		float proj0 = w0 > 0.0f ? x0 / w0 : (x0 < 0.0f ? -FLT_MAX : FLT_MAX);
-		float proj1 = w1 > 0.0f ? x1 / w1 : (x1 < 0.0f ? -FLT_MAX : FLT_MAX);
+		float proj0 = wTangent0 > 0.0f ? xTangent0 / wTangent0 : (xTangent0 < 0.0f ? -1.0f : 1.0f);
+		float proj1 = wTangent1 > 0.0f ? xTangent1 / wTangent1 : (xTangent1 < 0.0f ? -1.0f : 1.0f);
 		xmin = min(proj0, proj1);
 		xmax = max(proj0, proj1);
 	}
 
-	CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix) const override
+	//CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix) const override
+	CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, float aspect) const override
 	{
 		STATS_ADD(mStats.mOccludees.mNumProcessedSpheres, 1);
 		assert(mMaskedHiZBuffer != nullptr);
@@ -1644,17 +1645,17 @@ public:
 		//////////////////////////////////////////////////////////////////////////////
 		// Transform sphere origin to clip space and test if camera is inside sphere.
 		//////////////////////////////////////////////////////////////////////////////
-		if (modelToClipMatrix)
-		{
-			__m128 mtxCol0 = _mm_loadu_ps(modelToClipMatrix);
-			__m128 mtxCol1 = _mm_loadu_ps(modelToClipMatrix + 4);
-			__m128 mtxCol2 = _mm_loadu_ps(modelToClipMatrix + 8);
-			__m128 mtxCol3 = _mm_loadu_ps(modelToClipMatrix + 12);
-			__m128 xform = _mmx_fmadd_ps(mtxCol0, _mm_set1_ps(centerX), _mmx_fmadd_ps(mtxCol1, _mm_set1_ps(centerY), _mmx_fmadd_ps(mtxCol2, _mm_set1_ps(centerZW), mtxCol3)));
-			centerX = simd_f32(xform)[0];
-			centerY = simd_f32(xform)[1];
-			centerZW = simd_f32(xform)[3];
-		}
+		//if (modelToClipMatrix)
+		//{
+		//	__m128 mtxCol0 = _mm_loadu_ps(modelToClipMatrix);
+		//	__m128 mtxCol1 = _mm_loadu_ps(modelToClipMatrix + 4);
+		//	__m128 mtxCol2 = _mm_loadu_ps(modelToClipMatrix + 8);
+		//	__m128 mtxCol3 = _mm_loadu_ps(modelToClipMatrix + 12);
+		//	__m128 xform = _mmx_fmadd_ps(mtxCol0, _mm_set1_ps(centerX), _mmx_fmadd_ps(mtxCol1, _mm_set1_ps(centerY), _mmx_fmadd_ps(mtxCol2, _mm_set1_ps(centerZW), mtxCol3)));
+		//	centerX = simd_f32(xform)[0];
+		//	centerY = simd_f32(xform)[1];
+		//	centerZW = simd_f32(xform)[3];
+		//}
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Setup sphere-ray intersection and determine if camera is inside sphere
@@ -1668,9 +1669,11 @@ public:
 		// Compute clip space bounding rectangle (using circle tangent lines)
 		//////////////////////////////////////////////////////////////////////////////
 
-		float xmin = -FLT_MAX, xmax = FLT_MAX, ymin = -FLT_MAX, ymax = FLT_MAX;
+		float xmin = -1.0f, xmax = 1.0f, ymin = -1.0f, ymax = 1.0f;
 		SphereBounds2D(centerX, centerZW, radius, xmin, xmax);
 		SphereBounds2D(centerY, centerZW, radius, ymin, ymax);
+		xmin /= aspect;
+		xmax /= aspect;
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Compute screen space bounding box and guard for out of bounds
@@ -1698,16 +1701,12 @@ public:
 		// Setup clip space tile coordinates, used to calculate sphere overlap.
 		///////////////////////////////////////////////////////////////////////////////
 
-		float clipSpaceStepX = (2.0f*(float)TILE_WIDTH / (float)mWidth);
-		__mw clipSpaceStartX = _mmw_sub_ps(_mmw_div_ps(_mmw_cvtepi32_ps(startPixelX), mHalfWidth), _mmw_set1_ps(1.0f));
-#if USE_D3D != 0
-		float clipSpaceStepY = -(2.0f*(float)TILE_HEIGHT / (float)mHeight);
-		//__mw clipSpaceY = _mmw_add_ps(_mmw_div_ps(_mmw_cvtepi32_ps(startPixelY), mHalfHeight), _mmw_set1_ps(1.0f + clipSpaceStepY));
-		__mw clipSpaceY = _mmw_add_ps(_mmw_div_ps(_mmw_cvtepi32_ps(startPixelY), mHalfHeight), _mmw_set1_ps(1.0f));
-#else
-		float clipSpaceStepY = (2.0f*(float)TILE_HEIGHT / (float)mHeight);
-		__mw clipSpaceY = _mmw_sub_ps(_mmw_div_ps(_mmw_cvtepi32_ps(startPixelY), mHalfHeight), _mmw_set1_ps(1.0f));
-#endif
+		float clipSpaceTileX = aspect * (float)TILE_WIDTH / simd_f32(mHalfWidth)[0];
+		float clipSpaceTileY = (float)TILE_HEIGHT / simd_f32(mHalfHeight)[0];
+		float clipSpaceSubtileX = aspect * (float)SUB_TILE_WIDTH / simd_f32(mHalfWidth)[0];
+		float clipSpaceSubtileY = (float)SUB_TILE_HEIGHT / simd_f32(mHalfHeight)[0];
+		__mw clipSpaceStartX = _mmw_mul_ps(_mmw_set1_ps(aspect), _mmw_div_ps(_mmw_sub_ps(_mmw_cvtepi32_ps(startPixelX), mCenterX), mHalfWidth));
+		__mw clipSpaceY = _mmw_div_ps(_mmw_sub_ps(_mmw_cvtepi32_ps(startPixelY), mCenterY), mHalfHeight);
 
 		for (;;)
 		{
@@ -1723,24 +1722,27 @@ public:
 				// Find ray direction that will generate wMin/zMax and is inside sphere
 				///////////////////////////////////////////////////////////////////////////////
 
-				// Tile corners
+				// Tile corners, note max/min are swapped betweeen OGL/DX for y axis
 				__mw subtileMinX = clipSpaceX;
+				__mw subtileMaxX = _mmw_add_ps(subtileMinX, _mmw_set1_ps(clipSpaceSubtileX));
+#if USE_D3D != 0
+				__mw subtileMaxY = clipSpaceY;
+				__mw subtileMinY = _mmw_add_ps(subtileMaxY, _mmw_set1_ps(clipSpaceSubtileY));
+#else
 				__mw subtileMinY = clipSpaceY;
-				__mw subtileMaxX = _mmw_add_ps(subtileMinX, _mmw_set1_ps(clipSpaceStepX));
-				__mw subtileMaxY = _mmw_add_ps(subtileMinY, _mmw_set1_ps(clipSpaceStepY));
+				__mw subtileMaxY = _mmw_add_ps(subtileMinY, _mmw_set1_ps(clipSpaceSubtileY));
+#endif
 
 				// Dot products to classify which side sphere center is of tile boundaries
-				__mw dpStartX = _mmw_fmadd_ps(subtileMinX, _mmw_set1_ps(centerX), _mmw_set1_ps(centerZW)); // (startX, 0, 1) dot (centerX, centerY, centerZW)
-				__mw dpStartY = _mmw_fmadd_ps(subtileMinY, _mmw_set1_ps(centerY), _mmw_set1_ps(centerZW)); // (0, startY, 1) dot (centerX, centerY, centerZW)
-				__mw dpEndX = _mmw_fmadd_ps(subtileMaxX, _mmw_set1_ps(centerX), _mmw_set1_ps(centerZW)); // (endX, 0, 1) dot (centerX, centerY, centerZW)
-				__mw dpEndY = _mmw_fmadd_ps(subtileMaxX, _mmw_set1_ps(centerY), _mmw_set1_ps(centerZW)); // (0, endY, 1) dot (centerX, centerY, centerZW)
+				__mw dpStartX = _mmw_fmadd_ps(subtileMinX, _mmw_set1_ps(centerZW), _mmw_set1_ps(centerX)); // (1, 0, startX) dot (centerX, centerY, centerZW)
+				__mw dpStartY = _mmw_fmadd_ps(subtileMinY, _mmw_set1_ps(centerZW), _mmw_set1_ps(centerY)); // (0, 1, startY) dot (centerX, centerY, centerZW)
+				__mw dpEndX = _mmw_fmadd_ps(subtileMaxX, _mmw_set1_ps(centerZW), _mmw_set1_ps(centerX));   // (1, 0, endX) dot (centerX, centerY, centerZW)
+				__mw dpEndY = _mmw_fmadd_ps(subtileMaxY, _mmw_set1_ps(centerZW), _mmw_set1_ps(centerY));   // (0, 1, endY) dot (centerX, centerY, centerZW)
 
 				// Setup ray through tile edge or towards sphere center
 				__mw rayDirX, rayDirY;
-				rayDirX = _mmw_blendv_ps(subtileMinX, subtileMaxX, dpEndX);
-				rayDirX = _mmw_blendv_ps(rayDirX, _mmw_set1_ps(centerX), dpStartX);
-				rayDirY = _mmw_blendv_ps(subtileMinY, subtileMaxY, dpEndY);
-				rayDirY = _mmw_blendv_ps(rayDirY, _mmw_set1_ps(centerY), dpStartY);
+				rayDirX = _mmw_blendv_ps(_mmw_blendv_ps(subtileMinX, _mmw_set1_ps(centerX), dpStartX), subtileMaxX, dpEndX);
+				rayDirY = _mmw_blendv_ps(_mmw_blendv_ps(subtileMinY, _mmw_set1_ps(centerY), dpStartY), subtileMaxY, dpEndY);
 
 				//////////////////////////////////////////////////////////////////////////////
 				// Do ray-sphere intersection test
@@ -1759,11 +1761,15 @@ public:
 				__mw zMax = _mmw_div_ps(_mmw_mul_ps(_mmw_set1_ps(2.0f), eqnA), _mmw_sub_ps(eqnB, _mmw_sqrt_ps(discr)));
 
 				// Set mask in all tiles where intersection is found
-				__mwi sphereMask = simd_cast<__mwi>(_mmw_cmpge_ps(_mmw_set1_ps(0.0f), discr));
+				__mwi sphereMask = simd_cast<__mwi>(_mmw_cmpge_ps(discr, _mmw_set1_ps(0.0f)));
 				
 				///////////////////////////////////////////////////////////////////////////////
 				// Test vs contents of HiZ buffer
 				///////////////////////////////////////////////////////////////////////////////
+
+				//mMaskedHiZBuffer[tileIdx].mZMin[0] = _mmw_set1_ps(0.0f);
+				//mMaskedHiZBuffer[tileIdx].mZMin[1] = zMax;
+				//mMaskedHiZBuffer[tileIdx].mMask = sphereMask;
 
 				// Fetch zMin from masked hierarchical Z buffer
 #if QUICK_MASK != 0
@@ -1786,13 +1792,13 @@ public:
 
 				if (++tx >= txMax)
 					break;
-				clipSpaceX = _mmw_add_ps(clipSpaceX, _mmw_set1_ps(clipSpaceStepX));
+				clipSpaceX = _mmw_add_ps(clipSpaceX, _mmw_set1_ps(clipSpaceTileX));
 			}
 
 			tileRowIdx += mTilesWidth;
 			if (tileRowIdx >= tileRowIdxEnd)
 				break;
-			clipSpaceY = _mmw_add_ps(clipSpaceY, _mmw_set1_ps(clipSpaceStepY));
+			clipSpaceY = _mmw_add_ps(clipSpaceY, _mmw_set1_ps(clipSpaceTileY));
 		}
 
 		return CullingResult::OCCLUDED;

@@ -340,7 +340,8 @@ public:
 	 *         if the rectangle is outside the view frustum.
 	 */
 	virtual CullingResult TestRect(float xmin, float ymin, float xmax, float ymax, float wmin) const = 0;
-	virtual CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix) const = 0;
+	//virtual CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix) const = 0;
+	virtual CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, float aspect) const = 0;
 
 	/*!
 	 * \brief This function is similar to RenderTriangles(), but performs an occlusion
