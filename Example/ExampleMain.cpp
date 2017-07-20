@@ -171,7 +171,7 @@ int main(int argc, char* argv[])
 	// Render the occlusion query triangle to show its position
 	moc->RenderTriangles((float*)oqTriVerts, oqTriIndices, 1);
 
-	moc->TestSphere(0, 0, 20, 10, 1920.0f / 1080.0f);
+	moc->TestSphere(10, 10, 20, 10, 1920.0f / 1080.0f);
 
 	// Perform an occlusion query testing if a rectangle is visible. The rectangle is completely 
 	// behind the previously drawn quad, so the query should indicate that it's occluded

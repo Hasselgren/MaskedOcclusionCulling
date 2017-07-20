@@ -85,7 +85,8 @@ template<typename T> FORCE_INLINE T min(const T &a, const T &b) { return a < b ?
 #define SIMD_TILE_WIDTH     _mmw_set1_epi32(TILE_WIDTH)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Vertex fetch utility function, need to be in global namespace due to template specialization
+// Vertex fetch utility function, need to be in global namespace due to template specialization. This function is used for the optimized
+// case of (X,Y,Z,W) packed vertices, specified by the VertexLayout struct.
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<int N> FORCE_INLINE void VtxFetch4(__mw *v, const unsigned int *inTrisPtr, int triVtx, const float *inVtx, int numLanes)
@@ -275,6 +276,10 @@ public:
 	// Polygon clipping functions
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+	/*
+	 * Clip a single polygon, uses SSE (simd4). Would be nice to be able to clip multiple polygons in parallel using AVX2/AVX512,
+	 * but the clipping code is typically not a significant bottleneck.
+	 */
 	FORCE_INLINE int ClipPolygon(__m128 *outVtx, __m128 *inVtx, const __m128 &plane, int n) const
 	{
 		__m128 p0 = inVtx[n - 1];
@@ -312,6 +317,9 @@ public:
 		return nout;
 	}
 
+	/*
+	 * View frustum culling: Test a SIMD-batch of triangles vs all frustum planes indicated by the mask.
+	 */
 	template<ClipPlanes CLIP_PLANE> void TestClipPlane(__mw *vtxX, __mw *vtxY, __mw *vtxW, unsigned int &straddleMask, unsigned int &triMask, ClipPlanes clipPlaneMask)
 	{
 		straddleMask = 0;
@@ -342,6 +350,11 @@ public:
 		triMask &= ~outMask;
 	}
 
+	/*
+	 * Processes all triangles in a SIMD-batch and clips the triangles overlapping frustum planes. Clipping may add additional triangles. 
+	 * The first triangle is always written back into the SIMD-batch, and remaining triangles are written to the clippedTrisBuffer 
+	 * scratchpad memory.
+	 */
 	FORCE_INLINE void ClipTriangleAndAddToBuffer(__mw *vtxX, __mw *vtxY, __mw *vtxW, __m128 *clippedTrisBuffer, int &clipWriteIdx, unsigned int &triMask, unsigned int triClipMask, ClipPlanes clipPlaneMask)
 	{
 		if (!triClipMask)
@@ -407,6 +420,9 @@ public:
 	// Vertex transform & projection
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+	/*
+	 * Multiplies all vertices for a SIMD-batch of triangles by a 4x4 matrix. The output Z component is ignored, and the W=1 is assumed.
+	 */
 	FORCE_INLINE void TransformVerts(__mw *vtxX, __mw *vtxY, __mw *vtxW, const float *modelToClipMatrix)
 	{
 		if (modelToClipMatrix != nullptr)
@@ -423,6 +439,9 @@ public:
 	}
 
 #if PRECISE_COVERAGE != 0
+	/*
+	 * Projects a SIMD-batch of triangles and transforms screen space/pixel coodaintes.
+	 */
 	FORCE_INLINE void ProjectVertices(__mwi *ipVtxX, __mwi *ipVtxY, __mw *pVtxX, __mw *pVtxY, __mw *pVtxZ, const __mw *vtxX, const __mw *vtxY, const __mw *vtxW)
 	{
 #if USE_D3D != 0
@@ -446,6 +465,9 @@ public:
 		}
 	}
 #else
+	/*
+	 * Projects a SIMD-batch of triangles and transforms to screen space/pixel coodaintes.
+	 */
 	FORCE_INLINE void ProjectVertices(__mw *pVtxX, __mw *pVtxY, __mw *pVtxZ, const __mw *vtxX, const __mw *vtxY, const __mw *vtxW)
 	{
 #if USE_D3D != 0
@@ -504,6 +526,9 @@ public:
 	// Triangle rasterization functions
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+	/*
+	 * Computes the screen space bounding boxes (rectangles) for a SIMD-batch of projected triangles
+	 */
 	FORCE_INLINE void ComputeBoundingBox(__mwi &bbminX, __mwi &bbminY, __mwi &bbmaxX, __mwi &bbmaxY, const __mw *vX, const __mw *vY, const ScissorRect *scissor)
 	{
 		static const __mwi SIMD_PAD_W_MASK = _mmw_set1_epi32(~(TILE_WIDTH - 1));
@@ -529,6 +554,9 @@ public:
 	}
 
 #if PRECISE_COVERAGE != 0
+	/*
+	 * Sorts the vertices in a SIMD-batch of triangles so that vY[0] <= vY[1] && vY[0] < vY[2]
+	 */
 	FORCE_INLINE void SortVertices(__mwi *vX, __mwi *vY)
 	{
 		// Rotate the triangle in the winding order until v0 is the vertex with lowest Y value
@@ -549,6 +577,9 @@ public:
 		}
 	}
 
+	/*
+	 * Performs backface culling for a SIMD-batch of triangles, and makes sure all non-culled triangles are counter-clockwise winded.
+	 */
 	FORCE_INLINE int CullBackfaces(__mwi *ipVtxX, __mwi *ipVtxY, __mw *pVtxX, __mw *pVtxY, __mw *pVtxZ, const __mw &ccwMask, BackfaceWinding bfWinding)
 	{
 		// Reverse vertex order if non cw faces are considered front facing (rasterizer code requires CCW order)
@@ -577,6 +608,9 @@ public:
 		return ((bfWinding & BACKFACE_CCW) ? 0 : _mmw_movemask_ps(ccwMask)) | ((bfWinding & BACKFACE_CW) ? 0 : ~_mmw_movemask_ps(ccwMask));
 	}
 #else
+	/*
+	 * Sorts the vertices in a SIMD-batch of triangles so that vY[0] <= vY[1] && vY[0] < vY[2]
+	 */
 	FORCE_INLINE void SortVertices(__mw *vX, __mw *vY)
 	{
 		// Rotate the triangle in the winding order until v0 is the vertex with lowest Y value
@@ -597,6 +631,9 @@ public:
 		}
 	}
 
+	/*
+	 * Performs backface culling for a SIMD-batch of triangles, and makes sure all non-culled triangles are counter-clockwise winded.
+	 */
 	FORCE_INLINE int CullBackfaces(__mw *pVtxX, __mw *pVtxY, __mw *pVtxZ, const __mw &ccwMask, BackfaceWinding bfWinding)
 	{
 		// Reverse vertex order if non cw faces are considered front facing (rasterizer code requires CCW order)
@@ -619,6 +656,9 @@ public:
 	}
 #endif
 
+	/*
+	 * Computes the depth plane equations for a SIMD-batch of projected triangles
+	 */
 	FORCE_INLINE void ComputeDepthPlane(const __mw *pVtxX, const __mw *pVtxY, const __mw *pVtxZ, __mw &zPixelDx, __mw &zPixelDy) const
 	{
 		// Setup z(x,y) = z0 + dx*x + dy*y screen space depth plane equation
@@ -633,6 +673,9 @@ public:
 		zPixelDy = _mmw_mul_ps(_mmw_fmsub_ps(x1, z2, _mmw_mul_ps(z1, x2)), d);
 	}
 
+	/*
+	 * Updates a tile in the HiZ buffer using the quicker, but less accurate heuristic
+	 */
 	FORCE_INLINE void UpdateTileQuick(int tileIdx, const __mwi &coverage, const __mw &zTriv)
 	{
 		// Update heuristic used in the paper "Masked Software Occlusion Culling", 
@@ -674,6 +717,9 @@ public:
 		mMaskedHiZBuffer[tileIdx].mMask = _mmw_andnot_epi32(maskFull, mask);
 	}
 
+	/*
+	 * Updates a tile in the HiZ buffer using the slower, but less accurate heuristic
+	 */
 	FORCE_INLINE void UpdateTileAccurate(int tileIdx, const __mwi &coverage, const __mw &zTriv)
 	{
 		assert(tileIdx >= 0 && tileIdx < mTilesWidth*mTilesHeight);
@@ -748,6 +794,12 @@ public:
 		zMin[1] = _mmw_blendv_ps(z1t, z0, simd_cast<__mw>(d1min));
 	}
 
+	/*
+	 * Traverses a scanline of 32 x SIMD_LANES pixel tiles
+	 *     - Computes pixel coverage
+	 *     - Performs coarse z-culling
+	 *     - Updates HiZ buffer, or performs occlusion query (depending on the TEST_Z template parameter)
+	 */
 	template<int TEST_Z, int NRIGHT, int NLEFT>
 	FORCE_INLINE int TraverseScanline(int leftOffset, int rightOffset, int tileIdx, int rightEvent, int leftEvent, const __mwi *events, const __mw &zTriMin, const __mw &zTriMax, const __mw &iz0, float zx)
 	{
@@ -829,7 +881,12 @@ public:
 		return TEST_Z ? CullingResult::OCCLUDED : CullingResult::VISIBLE;
 	}
 
-
+	/*
+	 * Traverses the triangle bounding box in tile scanline order, starting from the lowest Y coordinate. For each scanline of tiles:
+	 *     - Computes the pixel coordinates of the left & right triangle edge (triEvents)
+	 *     - When reaching the middle vertex, change to the final triangle edge isntead
+	 *     - Invokes TraverseScanline() to traverse each individual scanline of tiles
+	 */
 	template<int TEST_Z, int TIGHT_TRAVERSAL, int MID_VTX_RIGHT>
 #if PRECISE_COVERAGE != 0
 	FORCE_INLINE int RasterizeTriangle(unsigned int triIdx, int bbWidth, int tileRowIdx, int tileMidRowIdx, int tileEndRowIdx, const __mwi *eventStart, const __mw *slope, const __mwi *slopeTileDelta, const __mw &zTriMin, const __mw &zTriMax, __mw &z0, float zx, float zy, const __mwi *edgeY, const __mwi *absEdgeX, const __mwi *slopeSign, const __mwi *eventStartRemainder, const __mwi *slopeTileRemainder)
@@ -1055,6 +1112,12 @@ public:
 		return TEST_Z ? CullingResult::OCCLUDED : CullingResult::VISIBLE;
 	}
 
+	/*
+	 * Performs triangle/rasterization setup for a SIMD-batch of projected triangles, and invokes RasterizeTriangle() to rasterize each non-culled triangle
+	 *     - Computes screen space bounding box/rectangle
+	 *     - Sets up z = Z(x,y) depth plane equation
+	 *     - Sets up x = L(y) equations to track triangle edge x/y coordinate dependencies
+	 */
 	template<bool TEST_Z>
 #if PRECISE_COVERAGE != 0
 	FORCE_INLINE int RasterizeTriangleBatch(__mwi ipVtxX[3], __mwi ipVtxY[3], __mw pVtxX[3], __mw pVtxY[3], __mw pVtxZ[3], unsigned int triMask, const ScissorRect *scissor)
@@ -1340,7 +1403,10 @@ public:
 		return cullResult;
 	}
 
-	template<int TEST_Z, int FAST_GATHER>
+	/*
+	 * Rasterizes a list of triangles. Wrapper for the API function, but templated with TEST_Z to allow re-using the same rasterization code both when rasterizing occluders and preforming occlusion tests.
+	 */
+	template<int TEST_Z>
 	FORCE_INLINE CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
 	{
 		assert(mMaskedHiZBuffer != nullptr);
@@ -1358,11 +1424,12 @@ public:
 		int clipHead = 0;
 		int clipTail = 0;
 		__m128 clipTriBuffer[MAX_CLIPPED * 3];
-		int cullResult = CullingResult::VIEW_CULLED;
 
-		const unsigned int *inTrisPtr = inTris;
-		int numLanes = SIMD_LANES;
 		int triIndex = 0;
+		const unsigned int *inTrisPtr = inTris;
+		int cullResult = CullingResult::VIEW_CULLED;
+		bool fastGather = vtxLayout.mStride == 16 && vtxLayout.mOffsetY == 4 && vtxLayout.mOffsetW == 12;
+
 		while (triIndex < nTris || clipHead != clipTail)
 		{
 			//////////////////////////////////////////////////////////////////////////////
@@ -1371,6 +1438,7 @@ public:
 			__mw vtxX[3], vtxY[3], vtxW[3];
 			unsigned int triMask = SIMD_ALL_LANES_MASK, triClipMask = SIMD_ALL_LANES_MASK;
 
+			int numLanes = SIMD_LANES;
 			if (clipHead != clipTail)
 			{
 				int clippedTris = clipHead > clipTail ? clipHead - clipTail : MAX_CLIPPED + clipHead - clipTail;
@@ -1379,7 +1447,7 @@ public:
 				// Fill out SIMD registers by fetching more triangles. 
 				numLanes = max(0, min(SIMD_LANES - clippedTris, nTris - triIndex));
 				if (numLanes > 0) {
-					if (FAST_GATHER)
+					if (fastGather)
 						GatherVerticesFast(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes);
 					else
 						GatherVertices(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes, vtxLayout);
@@ -1411,7 +1479,7 @@ public:
 				triMask = (1U << numLanes) - 1;
 				triClipMask = triMask;
 
-				if (FAST_GATHER)
+				if (fastGather)
 					GatherVerticesFast(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes);
 				else
 					GatherVertices(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes, vtxLayout);
@@ -1487,18 +1555,12 @@ public:
 
 	CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
 	{
-		if (vtxLayout.mStride == 16 && vtxLayout.mOffsetY == 4 && vtxLayout.mOffsetW == 12)
-			return (CullingResult)RenderTriangles<0, 1>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
-
-		return (CullingResult)RenderTriangles<0, 0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
+		return (CullingResult)RenderTriangles<0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
 	CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
 	{
-		if (vtxLayout.mStride == 16 && vtxLayout.mOffsetY == 4 && vtxLayout.mOffsetW == 12)
-			return (CullingResult)RenderTriangles<1, 1>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
-
-		return (CullingResult)RenderTriangles<1, 0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
+		return (CullingResult)RenderTriangles<1>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1633,6 +1695,32 @@ public:
 		xmax = max(proj0, proj1);
 	}
 
+	/*
+	 * Compute the cone passing through the silhouette of a sphere at a given distance from the observer.
+	 * Used to compute screenspace bounds when rasterizing spheres
+	 */
+	FORCE_INLINE void SphereSilhouette(float d, float r, float &coneDist, float &coneRadius) const
+	{
+		float r2_d2 = (r*r) / (d*d);
+		coneDist = 1.0f - r2_d2;
+		coneRadius = sqrtf((d*d)/(r*r) - 1.0f) * r2_d2;	
+	}
+
+	FORCE_INLINE void ConeBounds2D(float x, float w, float coneDist, float coneRadius, float &xmin, float &xmax) const
+	{
+		float silhouetteX = x*coneDist;
+		float silhouetteW = w*coneDist;
+
+		// Compute extents perpendicular to sphere central vector
+		float x0 = silhouetteX - w*coneRadius, w0 = silhouetteW + x*coneRadius;
+		float x1 = silhouetteX + w*coneRadius, w1 = silhouetteW - x*coneRadius;
+
+		float proj0 = w0 > 0.0f ? x0 / w0 : (x0 < 0.0f ? -1.0f : 1.0f);
+		float proj1 = w1 > 0.0f ? x1 / w1 : (x1 < 0.0f ? -1.0f : 1.0f);
+		xmin = min(proj0, proj1);
+		xmax = max(proj0, proj1);
+	}
+
 	//CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, const float *modelToClipMatrix) const override
 	CullingResult TestSphere(float centerX, float centerY, float centerZW, float radius, float aspect) const override
 	{
@@ -1669,7 +1757,11 @@ public:
 		// Compute clip space bounding rectangle (using circle tangent lines)
 		//////////////////////////////////////////////////////////////////////////////
 
+		float coneDist, coneRadius;
 		float xmin = -1.0f, xmax = 1.0f, ymin = -1.0f, ymax = 1.0f;
+		SphereSilhouette(sqrtf(centerX*centerX + centerY*centerY + centerZW*centerZW), radius, coneDist, coneRadius);
+		ConeBounds2D(centerX, centerZW, coneDist, coneRadius, xmin, xmax);
+		ConeBounds2D(centerY, centerZW, coneDist, coneRadius, ymin, ymax);
 		SphereBounds2D(centerX, centerZW, radius, xmin, xmax);
 		SphereBounds2D(centerY, centerZW, radius, ymin, ymax);
 		xmin /= aspect;
@@ -1767,29 +1859,29 @@ public:
 				// Test vs contents of HiZ buffer
 				///////////////////////////////////////////////////////////////////////////////
 
-				//mMaskedHiZBuffer[tileIdx].mZMin[0] = _mmw_set1_ps(0.0f);
-				//mMaskedHiZBuffer[tileIdx].mZMin[1] = zMax;
-				//mMaskedHiZBuffer[tileIdx].mMask = sphereMask;
+				mMaskedHiZBuffer[tileIdx].mZMin[0] = _mmw_set1_ps(0.0f);
+				mMaskedHiZBuffer[tileIdx].mZMin[1] = zMax;
+				mMaskedHiZBuffer[tileIdx].mMask = sphereMask;
 
-				// Fetch zMin from masked hierarchical Z buffer
-#if QUICK_MASK != 0
-				__mw zBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
-#else
-				__mwi mask = mMaskedHiZBuffer[tileIdx].mMask;
-				__mw zMin0 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[0], mMaskedHiZBuffer[tileIdx].mZMin[1], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_set1_epi32(~0))));
-				__mw zMin1 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[1], mMaskedHiZBuffer[tileIdx].mZMin[0], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_setzero_epi32())));
-				__mw zBuf = _mmw_min_ps(zMin0, zMin1);
-#endif
-				// Perform conservative greater than test against hierarchical Z buffer (zMax >= zBuf means the subtile is visible)
-				__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zMax, zBuf));	//zPass = zMax >= zBuf ? ~0 : 0
-
-				// Mask out lanes corresponding to subtiles outside the bounding box
-				zPass = _mmw_and_epi32(zPass, sphereMask);
-
-				// If not all tiles failed the conservative z test we can immediately terminate the test
-				if (!_mmw_testz_epi32(zPass, zPass))
-					return CullingResult::VISIBLE;
-
+//				// Fetch zMin from masked hierarchical Z buffer
+//#if QUICK_MASK != 0
+//				__mw zBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
+//#else
+//				__mwi mask = mMaskedHiZBuffer[tileIdx].mMask;
+//				__mw zMin0 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[0], mMaskedHiZBuffer[tileIdx].mZMin[1], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_set1_epi32(~0))));
+//				__mw zMin1 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[1], mMaskedHiZBuffer[tileIdx].mZMin[0], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_setzero_epi32())));
+//				__mw zBuf = _mmw_min_ps(zMin0, zMin1);
+//#endif
+//				// Perform conservative greater than test against hierarchical Z buffer (zMax >= zBuf means the subtile is visible)
+//				__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zMax, zBuf));	//zPass = zMax >= zBuf ? ~0 : 0
+//
+//				// Mask out lanes corresponding to subtiles outside the bounding box
+//				zPass = _mmw_and_epi32(zPass, sphereMask);
+//
+//				// If not all tiles failed the conservative z test we can immediately terminate the test
+//				if (!_mmw_testz_epi32(zPass, zPass))
+//					return CullingResult::VISIBLE;
+//
 				if (++tx >= txMax)
 					break;
 				clipSpaceX = _mmw_add_ps(clipSpaceX, _mmw_set1_ps(clipSpaceTileX));
@@ -1808,8 +1900,7 @@ public:
 	// Binning functions (for multithreading)
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	template<bool FAST_GATHER>
-	FORCE_INLINE void BinTriangles(const float *inVtx, const unsigned int *inTris, int nTris, TriList *triLists, unsigned int nBinsW, unsigned int nBinsH, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
+	void BinTriangles(const float *inVtx, const unsigned int *inTris, int nTris, TriList *triLists, unsigned int nBinsW, unsigned int nBinsH, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
 	{
 		assert(mMaskedHiZBuffer != nullptr);
 
@@ -1822,9 +1913,10 @@ public:
 		int clipTail = 0;
 		__m128 clipTriBuffer[MAX_CLIPPED * 3];
 
-		const unsigned int *inTrisPtr = inTris;
-		int numLanes = SIMD_LANES;
 		int triIndex = 0;
+		const unsigned int *inTrisPtr = inTris;
+		bool fastGather = vtxLayout.mStride == 16 && vtxLayout.mOffsetY == 4 && vtxLayout.mOffsetW == 12;
+
 		while (triIndex < nTris || clipHead != clipTail)
 		{
 			//////////////////////////////////////////////////////////////////////////////
@@ -1833,6 +1925,7 @@ public:
 			__mw vtxX[3], vtxY[3], vtxW[3];
 			unsigned int triMask = SIMD_ALL_LANES_MASK, triClipMask = SIMD_ALL_LANES_MASK;
 
+			int numLanes = SIMD_LANES;
 			if (clipHead != clipTail)
 			{
 				int clippedTris = clipHead > clipTail ? clipHead - clipTail : MAX_CLIPPED + clipHead - clipTail;
@@ -1841,7 +1934,7 @@ public:
 				// Fill out SIMD registers by fetching more triangles. 
 				numLanes = max(0, min(SIMD_LANES - clippedTris, nTris - triIndex));
 				if (numLanes > 0) {
-					if (FAST_GATHER)
+					if (fastGather)
 						GatherVerticesFast(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes);
 					else
 						GatherVertices(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes, vtxLayout);
@@ -1873,7 +1966,7 @@ public:
 				triMask = (1U << numLanes) - 1;
 				triClipMask = triMask;
 
-				if (FAST_GATHER)
+				if (fastGather)
 					GatherVerticesFast(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes);
 				else
 					GatherVertices(vtxX, vtxY, vtxW, inVtx, inTrisPtr, numLanes, vtxLayout);
@@ -1972,14 +2065,6 @@ public:
 #if PRECISE_COVERAGE != 0
 		_MM_SET_ROUNDING_MODE(originalRoundingMode);
 #endif
-	}
-
-	void BinTriangles(const float *inVtx, const unsigned int *inTris, int nTris, TriList *triLists, unsigned int nBinsW, unsigned int nBinsH, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
-	{
-		if (vtxLayout.mStride == 16 && vtxLayout.mOffsetY == 4 && vtxLayout.mOffsetW == 12)
-			BinTriangles<true>(inVtx, inTris, nTris, triLists, nBinsW, nBinsH, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
-		else
-			BinTriangles<false>(inVtx, inTris, nTris, triLists, nBinsW, nBinsH, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
 	void RenderTrilist(const TriList &triList, const ScissorRect *scissor) override
