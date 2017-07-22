@@ -409,6 +409,7 @@ cmake -DUSE_AVX512=ON -G"Visual Studio 14 2015 Win64" -T"LLVM-vs2014" ..
   * **Experimental**: Added support for AVX-512 capable CPUs. Currently only verified through [emulator](https://software.intel.com/en-us/articles/intel-software-development-emulator).
   * Added multiplatform support. Code now compiles on Visual C++ Compiler, Intel C++ Compiler, GCC, and Clang.
   * Added configurable backface culling, to support two-sided occluder rendering.
+  * Added `TestSphere()`, a bounding sphere occlusion test.
 * Version 1.2: 
   * Added support for threading, through a binning rasterizer. The `CullingThreadpool` class implements an example multi-threaded task system with a very similar 
     API to the `MaskedOcclusionCulling`class.
