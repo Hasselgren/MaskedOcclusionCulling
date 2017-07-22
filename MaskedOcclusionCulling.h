@@ -18,7 +18,7 @@
 /*!
  *  \file MaskedOcclusionCulling.h
  *  \brief Masked Occlusion Culling
- * 
+ *
  *  General information
  *   - Input to all API functions are (x,y,w) clip-space coordinates (x positive left, y positive up, w positive away from camera).
  *     We entirely skip the z component and instead compute it as 1 / w, see next bullet. For TestRect the input is NDC (x/w, y/w).
@@ -51,10 +51,10 @@
 
 #ifndef USE_D3D
 /*!
- * Configures the library for use with Direct3D (default) or OpenGL rendering. This changes whether the 
- * screen space Y axis points downwards (D3D) or upwards (OGL), and is primarily important in combination 
+ * Configures the library for use with Direct3D (default) or OpenGL rendering. This changes whether the
+ * screen space Y axis points downwards (D3D) or upwards (OGL), and is primarily important in combination
  * with the PRECISE_COVERAGE define, where this is important to ensure correct rounding and tie-breaker
- * behaviour. It also affects the ScissorRect screen space coordinates and the memory layout of the buffer 
+ * behaviour. It also affects the ScissorRect screen space coordinates and the memory layout of the buffer
  * returned by ComputePixelDepthBuffer().
  */
 #define USE_D3D             1
@@ -81,10 +81,20 @@
 
 #ifndef ENABLE_STATS
 /*!
- * Define ENABLE_STATS to 1 to gather various statistics during occlusion culling. Can be used for profiling 
+ * Define ENABLE_STATS to 1 to gather various statistics during occlusion culling. Can be used for profiling
  * and debugging. Note that enabling this function will reduce performance significantly.
  */
 #define ENABLE_STATS        0
+
+#endif
+
+#ifndef QUERY_DEBUG_BUFFER
+ /*!
+  * Define QUERY_DEBUG_BUFFER to 1 to enable the debug buffer for occlusion qureies. The buffer is cleared
+  * every query, and during the qurey it is filled with the result (occluded = 0, visible != 0) for all processed
+  * pixels. Note that the query terminates after the first visible tile is found.
+  */
+#define QUERY_DEBUG_BUFFER  0
 
 #endif
 
@@ -92,7 +102,7 @@
 // Masked occlusion culling class
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-class MaskedOcclusionCulling 
+class MaskedOcclusionCulling
 {
 public:
 
@@ -107,7 +117,7 @@ public:
 	// Enums
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	enum Implementation 
+	enum Implementation
 	{
 		SSE2   = 0,
 		SSE41  = 1,
@@ -146,9 +156,9 @@ public:
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	/*!
-	 * Used to specify custom vertex layout. Memory offsets to y and z coordinates are set through 
-	 * mOffsetY and mOffsetW, and vertex stride is given by mStride. It's possible to configure both 
-	 * AoS and SoA layouts. Note that large strides may cause more cache misses and decrease 
+	 * Used to specify custom vertex layout. Memory offsets to y and z coordinates are set through
+	 * mOffsetY and mOffsetW, and vertex stride is given by mStride. It's possible to configure both
+	 * AoS and SoA layouts. Note that large strides may cause more cache misses and decrease
 	 * performance. It is advicable to store position data as compactly in memory as possible.
 	 */
 	struct VertexLayout
@@ -166,8 +176,8 @@ public:
 	};
 
 	/*!
-	 * Used to control scissoring during rasterization. Note that we only provide coarse scissor support. 
-	 * The scissor box x coordinates must be a multiple of 32, and the y coordinates a multiple of 8. 
+	 * Used to control scissoring during rasterization. Note that we only provide coarse scissor support.
+	 * The scissor box x coordinates must be a multiple of 32, and the y coordinates a multiple of 8.
 	 * Scissoring is mainly meant as a means of enabling binning (sort middle) rasterizers in case
 	 * application developers want to use that approach for multithreading.
 	 */
@@ -184,7 +194,7 @@ public:
 	};
 
 	/*!
-	 * Used to specify storage area for a binlist, containing triangles. This struct is used for binning 
+	 * Used to specify storage area for a binlist, containing triangles. This struct is used for binning
 	 * and multithreading. The host application is responsible for allocating memory for the binlists.
 	 */
 	struct TriList
@@ -195,7 +205,7 @@ public:
 	};
 
 	/*!
-	 * Statistics that can be gathered during occluder rendering and visibility to aid debugging 
+	 * Statistics that can be gathered during occluder rendering and visibility to aid debugging
 	 * and profiling. Must be enabled by changing the ENABLE_STATS define.
 	 */
 	struct OcclusionCullingStatistics
@@ -235,7 +245,7 @@ public:
 	static MaskedOcclusionCulling *Create(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree);
 
 	/*!
-	 * \brief Destroys an object and frees the z buffer memory. Note that you cannot 
+	 * \brief Destroys an object and frees the z buffer memory. Note that you cannot
 	 * use the delete operator, and should rather use this function to free up memory.
 	 */
 	static void Destroy(MaskedOcclusionCulling *moc);
@@ -251,11 +261,11 @@ public:
 	virtual void SetResolution(unsigned int width, unsigned int height) = 0;
 
 	/*!
-	* \brief Gets the resolution of the hierarchical depth buffer. 
-	*
-	* \param witdh Output: The width of the buffer in pixels
-	* \param height Output: The height of the buffer in pixels
-	*/
+	 * \brief Gets the resolution of the hierarchical depth buffer.
+	 *
+	 * \param witdh Output: The width of the buffer in pixels
+	 * \param height Output: The height of the buffer in pixels
+	 */
 	virtual void GetResolution(unsigned int &width, unsigned int &height) = 0;
 
 	/*!
@@ -265,9 +275,9 @@ public:
 	 *        rectangular bins.
 	 * \param nBinsH Number of horizontal bins, the screen is divided into nBinsW x nBinsH
 	 *        rectangular bins.
-	 * \param outBinWidth Output: The width of the single bin in pixels (except for the 
+	 * \param outBinWidth Output: The width of the single bin in pixels (except for the
 	 *        rightmost bin width, which is extended to resolution width)
-	 * \param outBinHeight Output: The height of the single bin in pixels (except for the 
+	 * \param outBinHeight Output: The height of the single bin in pixels (except for the
 	 *        bottommost bin height, which is extended to resolution height)
 	 */
 	virtual void ComputeBinWidthHeight(unsigned int nBinsW, unsigned int nBinsH, unsigned int & outBinWidth, unsigned int & outBinHeight) = 0;
@@ -280,8 +290,8 @@ public:
 	virtual void SetNearClipPlane(float nearDist) = 0;
 
 	/*!
-	* \brief Gets the distance for the near clipping plane. 
-	*/
+	 * \brief Gets the distance for the near clipping plane.
+	 */
 	virtual float GetNearClipPlane() = 0;
 
 	/*!
@@ -289,7 +299,7 @@ public:
 	 */
 	virtual void ClearBuffer() = 0;
 
-	/*! 
+	/*!
 	 * \brief Renders a mesh of occluder triangles and updates the hierarchical z buffer
 	 *        with conservative depth values.
 	 *
@@ -299,7 +309,7 @@ public:
 	 * \param inVtx Pointer to an array of input vertices, should point to the x component
 	 *        of the first vertex. The input vertices are given as (x,y,w) cooordinates
 	 *        in clip space. The memory layout can be changed using vtxLayout.
-	 * \param inTris Pointer to an arrray of vertex indices. Each triangle is created 
+	 * \param inTris Pointer to an arrray of vertex indices. Each triangle is created
 	 *        from three indices consecutively fetched from the array.
 	 * \param nTris The number of triangles to render (inTris must contain atleast 3*nTris
 	 *        entries)
@@ -310,11 +320,11 @@ public:
 	 *        and will not be rasterized. You may use BACKFACE_NONE to disable culling for
 	 *        double sided geometry
 	 * \param clipPlaneMask A mask indicating which clip planes should be considered by the
-	 *        triangle clipper. Can be used as an optimization if your application can 
-	 *        determine (for example during culling) that a group of triangles does not 
-	 *        intersect a certein frustum plane. However, setting an incorrect mask may 
+	 *        triangle clipper. Can be used as an optimization if your application can
+	 *        determine (for example during culling) that a group of triangles does not
+	 *        intersect a certein frustum plane. However, setting an incorrect mask may
 	 *        cause out of bounds memory accesses.
-	 * \param vtxLayout A struct specifying the vertex layout (see struct for detailed 
+	 * \param vtxLayout A struct specifying the vertex layout (see struct for detailed
 	 *        description). For best performance, it is advicable to store position data
 	 *        as compactly in memory as possible.
 	 * \return Will return VIEW_CULLED if all triangles are either outside the frustum or
@@ -323,9 +333,9 @@ public:
 	virtual CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
 
 	/*!
-	 * \brief Occlusion query for a rectangle with a given depth. The rectangle is given 
-	 *        in normalized device coordinates where (x,y) coordinates between [-1,1] map 
-	 *        to the visible screen area. The query uses a GREATER_EQUAL (reversed) depth 
+	 * \brief Occlusion query for a rectangle with a given depth. The rectangle is given
+	 *        in normalized device coordinates where (x,y) coordinates between [-1,1] map
+	 *        to the visible screen area. The query uses a GREATER_EQUAL (reversed) depth
 	 *        test meaning that depth values equal to the contents of the depth buffer are
 	 *        counted as visible.
 	 *
@@ -341,12 +351,32 @@ public:
 	 */
 	virtual CullingResult TestRect(float xmin, float ymin, float xmax, float ymax, float wmin) const = 0;
 
-	virtual CullingResult TestSphere(float centerX, float centerY, float centerZ, float radius, float xScale, float yScale) const = 0;
+	/*!
+	 * \brief Occlusion query for a bounding sphere. Note that The parameters for the sphere is
+	 *        given in _view space_, with the camera at the origin (0,0,0,1). This is in contrast
+	 *        to the other functions, which typically operate in clip space. The reason for this is
+	 *        that a sphere in clip space is not necessarily spherical on the screen due to aspec
+	 *        ratio. You must therefore also specify the xScale and yScale parameters, which translates
+	 *        to elements m00 and m11 of the projection matrix. This function requires you to use a
+	 *        standard GL/DX projection matrix, i.e. on the form (z component is ignored)
+	 *            ( xScale      0  0  0)
+	 *            (      0 yScale  0  0)
+	 *            (      0      0 za zb)
+	 *            (      0      0  1  0)
+	 *
+	 * \param viewCenterX view space x-coordinate of the center of the bounding sphere.
+	 * \param viewCenterY view space y-coordinate of the center of the bounding sphere.
+	 * \param viewCenterZ view space z-coordinate of the center of the bounding sphere.
+	 * \param viewRadius view space radius of the bounding sphere.
+	 * \param xScale element m00 of the projection matrix
+	 * \param yScale element m11 of the projection matrix
+	 */
+	virtual CullingResult TestSphere(float viewCenterX, float viewCenterY, float viewCenterZ, float viewRadius, float xScale, float yScale) const = 0;
 
 	/*!
 	 * \brief This function is similar to RenderTriangles(), but performs an occlusion
-	 *        query instead and does not update the hierarchical z buffer. The query uses 
-	 *        a GREATER_EQUAL (reversed) depth test meaning that depth values equal to the 
+	 *        query instead and does not update the hierarchical z buffer. The query uses
+	 *        a GREATER_EQUAL (reversed) depth test meaning that depth values equal to the
 	 *        contents of the depth buffer are counted as visible.
 	 *
 	 * This function is optimized for vertex layouts with stride 16 and y and w
@@ -355,7 +385,7 @@ public:
 	 * \param inVtx Pointer to an array of input vertices, should point to the x component
 	 *        of the first vertex. The input vertices are given as (x,y,w) cooordinates
 	 *        in clip space. The memory layout can be changed using vtxLayout.
-	 * \param inTris Pointer to an arrray of triangle indices. Each triangle is created 
+	 * \param inTris Pointer to an arrray of triangle indices. Each triangle is created
 	 *        from three indices consecutively fetched from the array.
 	 * \param nTris The number of triangles to render (inTris must contain atleast 3*nTris
 	 *        entries)
@@ -370,7 +400,7 @@ public:
 	 *        determine (for example during culling) that a group of triangles does not
 	 *        intersect a certein frustum plane. However, setting an incorrect mask may
 	 *        cause out of bounds memory accesses.
-	 * \param vtxLayout A struct specifying the vertex layout (see struct for detailed 
+	 * \param vtxLayout A struct specifying the vertex layout (see struct for detailed
 	 *        description). For best performance, it is advicable to store position data
 	 *        as compactly in memory as possible.
 	 * \return The query will return VISIBLE if the triangle mesh may be visible, OCCLUDED
@@ -438,18 +468,28 @@ public:
 
 	/*!
 	 * \brief Creates a per-pixel depth buffer from the hierarchical z buffer representation.
-	 *        Intended for visualizing the hierarchical depth buffer for debugging. The 
-	 *        buffer is written in scanline order, from the top to bottom (D3D) or bottom to 
+	 *        Intended for visualizing the hierarchical depth buffer for debugging. The
+	 *        buffer is written in scanline order, from the top to bottom (D3D) or bottom to
 	 *        top (OGL) of the surface. See the USE_D3D define.
 	 *
 	 * \param depthData Pointer to memory where the per-pixel depth data is written. Must
 	 *        hold storage for atleast width*height elements as set by setResolution.
 	 */
 	virtual void ComputePixelDepthBuffer(float *depthData) = 0;
-	
+
+	/*!
+	 * \brief Creates a per-pixel buffer containing the result of the last occlusion qurey
+	 *        (TestRect, TestTriangles, TestSphere). This function does nothing unless
+	 *        QUERY_DEBUG_BUFFER define is set.
+	 *
+	 * \param queryResult Pointer to memory where the per-pixel qurey data is written. Must
+	 *        hold storage for atleast width*height elements as set by setResolution.
+	 */
+	virtual void ComputePixelQueryBuffer(unsigned int *queryResult) = 0;
+
 	/*!
 	 * \brief Fetch occlusion culling statistics, returns zeroes if ENABLE_STATS define is
-	 *        not defined. The statistics can be used for profiling or debugging.
+	 *        not set. The statistics can be used for profiling or debugging.
 	 */
 	virtual OcclusionCullingStatistics GetStatistics() = 0;
 
@@ -462,15 +502,15 @@ public:
 	 * \brief Utility function for transforming vertices and outputting them to an (x,y,z,w)
 	 *        format suitable for the occluder rasterization and occludee testing functions.
 	 *
-	 * \param mtx Pointer to matrix data. The matrix should column major for post 
-	 *        multiplication (OGL) and row major for pre-multiplication (DX). This is 
+	 * \param mtx Pointer to matrix data. The matrix should column major for post
+	 *        multiplication (OGL) and row major for pre-multiplication (DX). This is
 	 *        consistent with OpenGL / DirectX behavior.
 	 * \param inVtx Pointer to an array of input vertices. The input vertices are given as
 	 *        (x,y,z) cooordinates. The memory layout can be changed using vtxLayout.
 	 * \param xfVtx Pointer to an array to store transformed vertices. The transformed
 	 *        vertices are always stored as array of structs (AoS) (x,y,z,w) packed in memory.
 	 * \param nVtx Number of vertices to transform.
-	 * \param vtxLayout A struct specifying the vertex layout (see struct for detailed 
+	 * \param vtxLayout A struct specifying the vertex layout (see struct for detailed
 	 *        description). For best performance, it is advicable to store position data
 	 *        as compactly in memory as possible. Note that for this function, the
 	 *        w-component is assumed to be 1.0.

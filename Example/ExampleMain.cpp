@@ -38,7 +38,7 @@ static void WriteBMP(const char *filename, const unsigned char *data, int w, int
 	FILE *f = fopen(filename, "wb");
 	fwrite(header, 1, sizeof(header), f);
 #if USE_D3D == 1
-	// Flip image because Y axis of Direct3D points in the opposite direction of bmp. If the library 
+	// Flip image because Y axis of Direct3D points in the opposite direction of bmp. If the library
 	// is configured for OpenGL (USE_D3D 0) then the Y axes would match and this wouldn't be required.
 	for (int y = 0; y < h; ++y)
 		fwrite(&data[(h - y - 1) * w * 3], 1, w * 3, f);
@@ -132,7 +132,7 @@ int main(int argc, char* argv[])
 	ClipspaceVertex quadVerts[] = { { -150, -150, 0, 200 }, { -10, -65, 0, 75 }, { 0, 0, 0, 20 }, { -40, 10, 0, 50 } };
 	unsigned int quadIndices[] = { 0, 1, 2, 0, 2, 3 };
 
-	// Render the quad. As an optimization, indicate that clipping is not required as it is 
+	// Render the quad. As an optimization, indicate that clipping is not required as it is
 	// completely inside the view frustum
 	moc->RenderTriangles((float*)quadVerts, quadIndices, 2, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_NONE);
 
@@ -171,9 +171,9 @@ int main(int argc, char* argv[])
 	// Render the occlusion query triangle to show its position
 	moc->RenderTriangles((float*)oqTriVerts, oqTriIndices, 1);
 
-	moc->TestSphere(3.2341, -1.125, 20, 10, 1080.0f / 1920.0f, 1.0f);
+	moc->TestSphere(3.2341f, -1.125f, 20.0f, 10.0f, 1080.0f / 1920.0f, 1.0f);
 
-	// Perform an occlusion query testing if a rectangle is visible. The rectangle is completely 
+	// Perform an occlusion query testing if a rectangle is visible. The rectangle is completely
 	// behind the previously drawn quad, so the query should indicate that it's occluded
 	result = moc->TestRect(-0.6f, -0.6f, -0.4f, -0.4f, 100);
 	if (result == MaskedOcclusionCulling::VISIBLE)

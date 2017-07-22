@@ -26,18 +26,18 @@ template<class T> CullingThreadpool::StateData<T>::StateData(unsigned int maxJob
 	mData = new T[mMaxJobs];
 }
 
-template<class T> CullingThreadpool::StateData<T>::~StateData() 
+template<class T> CullingThreadpool::StateData<T>::~StateData()
 {
 	SAFE_DELETE_ARRAY(mData);
 }
 
-template<class T> void CullingThreadpool::StateData<T>::AddData(const T &data) 
-{ 
-	mCurrentIdx++; mData[mCurrentIdx % mMaxJobs] = data; 
+template<class T> void CullingThreadpool::StateData<T>::AddData(const T &data)
+{
+	mCurrentIdx++; mData[mCurrentIdx % mMaxJobs] = data;
 }
 
 template<class T> const T *CullingThreadpool::StateData<T>::GetData() const
-{ 
+{
 	return &mData[mCurrentIdx % mMaxJobs];
 }
 
@@ -45,7 +45,7 @@ template<class T> const T *CullingThreadpool::StateData<T>::GetData() const
 // Helper class: Mostly lockless queue for render jobs
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-CullingThreadpool::RenderJobQueue::RenderJobQueue(unsigned int nBins, unsigned int maxJobs) : 
+CullingThreadpool::RenderJobQueue::RenderJobQueue(unsigned int nBins, unsigned int maxJobs) :
 	mNumBins(nBins),
 	mMaxJobs(maxJobs)
 {
@@ -228,8 +228,8 @@ void CullingThreadpool::SetupScissors()
 }
 
 void CullingThreadpool::ThreadRun(CullingThreadpool *threadPool, unsigned int threadId)
-{ 
-	threadPool->ThreadMain(threadId); 
+{
+	threadPool->ThreadMain(threadId);
 }
 
 void CullingThreadpool::ThreadMain(unsigned int threadIdx)
@@ -434,7 +434,7 @@ void CullingThreadpool::RenderTriangles(const float *inVtx, const unsigned int *
 {
 	for (int i = 0; i < nTris; i += TRIS_PER_JOB)
 	{
-		// Yield if work queue is full 
+		// Yield if work queue is full
 		while (!mRenderQueue->CanWrite())
 			std::this_thread::yield();
 

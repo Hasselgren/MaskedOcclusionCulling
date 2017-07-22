@@ -24,7 +24,7 @@
 #if USE_AVX512 != 0 && ((defined(_MSC_VER) && _MSC_VER >= 1911) || (defined(__INTEL_COMPILER) && __INTEL_COMPILER >= 1600) || (defined(__clang__) && __clang_major__ >= 4) || (defined(__GNUC__) && __GNUC__ >= 5))
 
 // The MaskedOcclusionCullingAVX512.cpp file should be compiled avx2/avx512 architecture options turned on in the compiler. However, the SSE
-// version in MaskedOcclusionCulling.cpp _must_ be compiled with SSE2 architecture allow backwards compatibility. Best practice is to 
+// version in MaskedOcclusionCulling.cpp _must_ be compiled with SSE2 architecture allow backwards compatibility. Best practice is to
 // use lowest supported target platform (e.g. /arch:SSE2) as project default, and elevate only the MaskedOcclusionCullingAVX2/512.cpp files.
 #ifndef __AVX2__
 	#error For best performance, MaskedOcclusionCullingAVX512.cpp should be compiled with /arch:AVX2
@@ -154,7 +154,7 @@ MAKE_ACCESSOR(simd_i32, __m512i, int, , 16)
 MAKE_ACCESSOR(simd_i32, __m512i, int, const, 16)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Specialized AVX input assembly function for general vertex gather 
+// Specialized AVX input assembly function for general vertex gather
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef MaskedOcclusionCulling::VertexLayout VertexLayout;
@@ -187,7 +187,7 @@ FORCE_INLINE void GatherVertices(__m512 *vtxX, __m512 *vtxY, __m512 *vtxW, const
 	// Compute per-lane index list offset that guards against out of bounds memory accesses
 	__m512i safeTriIdxOffset = _mm512_and_si512(SIMD_TRI_IDX_OFFSET, SIMD_LANE_MASK[numLanes]);
 
-	// Fetch triangle indices. 
+	// Fetch triangle indices.
 	__m512i vtxIdx[3];
 	vtxIdx[0] = _mmw_mullo_epi32(_mm512_i32gather_epi32(safeTriIdxOffset, (const int*)inTrisPtr + 0, 4), _mmw_set1_epi32(vtxLayout.mStride));
 	vtxIdx[1] = _mmw_mullo_epi32(_mm512_i32gather_epi32(safeTriIdxOffset, (const int*)inTrisPtr + 1, 4), _mmw_set1_epi32(vtxLayout.mStride));
@@ -266,7 +266,7 @@ namespace MaskedOcclusionCullingAVX512
 	{
 		__mmask16 mask = _mmw_movemask_ps(c);
 		return _mm512_mask_mov_ps(a, mask, b);
-	} 
+	}
 
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::AVX512;
 

@@ -44,9 +44,9 @@ template<typename T> FORCE_INLINE T min(const T &a, const T &b) { return a < b ?
 	#define FP_INV              (1.0f / (float)(1 << FP_BITS))
 #else
 	// Note that too low precision, without precise coverage, may cause overshoots / false coverage during rasterization.
-	// This is configured for 14 bits for AVX512 and 16 bits for SSE. Max tile slope delta is roughly 
-	// (screenWidth + 2*(GUARD_BAND_PIXEL_SIZE + 1)) * (2^FP_BITS * (TILE_HEIGHT + GUARD_BAND_PIXEL_SIZE + 1))  
-	// and must fit in 31 bits. With this config, max image resolution (width) is ~3272, so stay well clear of this limit. 
+	// This is configured for 14 bits for AVX512 and 16 bits for SSE. Max tile slope delta is roughly
+	// (screenWidth + 2*(GUARD_BAND_PIXEL_SIZE + 1)) * (2^FP_BITS * (TILE_HEIGHT + GUARD_BAND_PIXEL_SIZE + 1))
+	// and must fit in 31 bits. With this config, max image resolution (width) is ~3272, so stay well clear of this limit.
 	#define FP_BITS             (19 - TILE_HEIGHT_SHIFT)
 #endif
 
@@ -102,10 +102,10 @@ template<int N> FORCE_INLINE void VtxFetch4(__mw *v, const unsigned int *inTrisP
 	VtxFetch4<N - 1>(v, inTrisPtr, triVtx, inVtx, numLanes);
 }
 
-template<> FORCE_INLINE void VtxFetch4<0>(__mw *v, const unsigned int *inTrisPtr, int triVtx, const float *inVtx, int numLanes) 
+template<> FORCE_INLINE void VtxFetch4<0>(__mw *v, const unsigned int *inTrisPtr, int triVtx, const float *inVtx, int numLanes)
 {
 	// Workaround for unused parameter warning
-	(void)v; (void)inTrisPtr; (void)triVtx; (void)inVtx; (void)numLanes;
+	UNUSED_PARAMETER(v); UNUSED_PARAMETER(inTrisPtr); UNUSED_PARAMETER(triVtx); UNUSED_PARAMETER(inVtx); UNUSED_PARAMETER(numLanes);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -142,6 +142,9 @@ public:
 
 	ZTile           *mMaskedHiZBuffer;
 	ScissorRect     mFullscreenScissor;
+#if QUERY_DEBUG_BUFFER != 0
+	__mwi			*mQueryDebugBuffer;
+#endif
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructors and state handling
@@ -149,6 +152,9 @@ public:
 
 	MaskedOcclusionCullingPrivate(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree) : mFullscreenScissor(0, 0, 0, 0)
 	{
+#if QUERY_DEBUG_BUFFER != 0
+		mQueryDebugBuffer = nullptr;
+#endif
 		mMaskedHiZBuffer = nullptr;
 		mAlignedAllocCallback = alignedAlloc;
 		mAlignedFreeCallback = alignedFree;
@@ -167,6 +173,11 @@ public:
 
 	~MaskedOcclusionCullingPrivate() override
 	{
+#if QUERY_DEBUG_BUFFER != 0
+		if (mQueryDebugBuffer != nullptr)
+			mAlignedFreeCallback(mQueryDebugBuffer);
+		mQueryDebugBuffer = nullptr;
+#endif
 		if (mMaskedHiZBuffer != nullptr)
 			mAlignedFreeCallback(mMaskedHiZBuffer);
 		mMaskedHiZBuffer = nullptr;
@@ -180,6 +191,13 @@ public:
 		// Test if combination of resolution & SLOPE_FP_BITS bits may cause 32-bit overflow. Note that the maximum resolution estimate
 		// is only an estimate (not conservative). It's advicable to stay well below the limit.
 		assert(width < ((1U << 31) - 1U) / ((1U << FP_BITS) * (TILE_HEIGHT + (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f))) - (2U * (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f)));
+#endif
+
+#if QUERY_DEBUG_BUFFER != 0
+		// Delete debug buffer
+		if (mQueryDebugBuffer != nullptr)
+			mAlignedFreeCallback(mQueryDebugBuffer);
+		mQueryDebugBuffer = nullptr;
 #endif
 
 		// Delete current masked hierarchical Z buffer
@@ -222,6 +240,12 @@ public:
 		// Allocate masked hierarchical Z buffer (if zero size leave at nullptr)
 		if(mTilesWidth * mTilesHeight > 0)
 			mMaskedHiZBuffer = (ZTile *)mAlignedAllocCallback(64, sizeof(ZTile) * mTilesWidth * mTilesHeight);
+
+#if QUERY_DEBUG_BUFFER != 0
+		// Allocate debug buffer
+		if (mTilesWidth * mTilesHeight > 0)
+			mQueryDebugBuffer = (__mwi*)mAlignedAllocCallback(64, sizeof(__mwi) * mTilesWidth * mTilesHeight);
+#endif
 	}
 
 	void GetResolution(unsigned int &width, unsigned int &height) override
@@ -351,8 +375,8 @@ public:
 	}
 
 	/*
-	 * Processes all triangles in a SIMD-batch and clips the triangles overlapping frustum planes. Clipping may add additional triangles. 
-	 * The first triangle is always written back into the SIMD-batch, and remaining triangles are written to the clippedTrisBuffer 
+	 * Processes all triangles in a SIMD-batch and clips the triangles overlapping frustum planes. Clipping may add additional triangles.
+	 * The first triangle is always written back into the SIMD-batch, and remaining triangles are written to the clippedTrisBuffer
 	 * scratchpad memory.
 	 */
 	FORCE_INLINE void ClipTriangleAndAddToBuffer(__mw *vtxX, __mw *vtxY, __mw *vtxW, __m128 *clippedTrisBuffer, int &clipWriteIdx, unsigned int &triMask, unsigned int triClipMask, ClipPlanes clipPlaneMask)
@@ -383,7 +407,7 @@ public:
 			for (int i = 0; i < 3; i++)
 				vtxBuf[0][i] = _mm_setr_ps(simd_f32(vtxX[i])[triIdx], simd_f32(vtxY[i])[triIdx], simd_f32(vtxW[i])[triIdx], 1.0f);
 
-			// Clip triangle with straddling planes. 
+			// Clip triangle with straddling planes.
 			for (int i = 0; i < 5; ++i)
 			{
 				if ((straddleMask[i] & triBit) && (clipPlaneMask & (1 << i)))
@@ -482,7 +506,7 @@ public:
 			__mw rcpW = _mmw_div_ps(_mmw_set1_ps(1.0f), vtxW[i]);
 
 			// The rounding modes are set to match HW rasterization with OpenGL. In practice our samples are placed
-			// in the (1,0) corner of each pixel, while HW rasterizer uses (0.5, 0.5). We get (1,0) because of the 
+			// in the (1,0) corner of each pixel, while HW rasterizer uses (0.5, 0.5). We get (1,0) because of the
 			// floor used when interpolating along triangle edges. The rounding modes match an offset of (0.5, -0.5)
 			pVtxX[idx] = _mmw_ceil_ps(_mmw_fmadd_ps(_mmw_mul_ps(vtxX[i], mHalfWidth), rcpW, mCenterX));
 			pVtxY[idx] = _mmw_floor_ps(_mmw_fmadd_ps(_mmw_mul_ps(vtxY[i], mHalfHeight), rcpW, mCenterY));
@@ -498,11 +522,11 @@ public:
 	FORCE_INLINE void GatherVerticesFast(__mw *vtxX, __mw *vtxY, __mw *vtxW, const float *inVtx, const unsigned int *inTrisPtr, int numLanes)
 	{
 		// This function assumes that the vertex layout is four packed x, y, z, w-values.
-		// Since the layout is known we can get some additional performance by using a 
+		// Since the layout is known we can get some additional performance by using a
 		// more optimized gather strategy.
 		assert(numLanes >= 1);
 
-		// Gather vertices 
+		// Gather vertices
 		__mw v[4], swz[4];
 		for (int i = 0; i < 3; i++)
 		{
@@ -678,7 +702,7 @@ public:
 	 */
 	FORCE_INLINE void UpdateTileQuick(int tileIdx, const __mwi &coverage, const __mw &zTriv)
 	{
-		// Update heuristic used in the paper "Masked Software Occlusion Culling", 
+		// Update heuristic used in the paper "Masked Software Occlusion Culling",
 		// good balance between performance and accuracy
 		STATS_ADD(mStats.mOccluders.mNumTilesUpdated, 1);
 		assert(tileIdx >= 0 && tileIdx < mTilesWidth*mTilesHeight);
@@ -705,7 +729,7 @@ public:
 
 		__mwi maskFull = _mmw_cmpeq_epi32(mask, SIMD_BITS_ONE);
 
-		// Compute new value for zMin[1]. This has one of four outcomes: zMin[1] = min(zMin[1], zTriv),  zMin[1] = zTriv, 
+		// Compute new value for zMin[1]. This has one of four outcomes: zMin[1] = min(zMin[1], zTriv),  zMin[1] = zTriv,
 		// zMin[1] = FLT_MAX or unchanged, depending on if the layer is updated, discarded, fully covered, or not updated
 		__mw opA = _mmw_blendv_ps(zTriv, zMin[1], simd_cast<__mw>(deadLane));
 		__mw opB = _mmw_blendv_ps(zMin[1], zTriv, simd_cast<__mw>(discardLayerMask));
@@ -730,7 +754,7 @@ public:
 		// Swizzle coverage mask to 8x4 subtiles
 		__mwi rastMask = _mmw_transpose_epi8(coverage);
 
-		// Perform individual depth tests with layer 0 & 1 and mask out all failing pixels 
+		// Perform individual depth tests with layer 0 & 1 and mask out all failing pixels
 		__mw sdist0 = _mmw_sub_ps(zMin[0], zTriv);
 		__mw sdist1 = _mmw_sub_ps(zMin[1], zTriv);
 		__mwi sign0 = _mmw_srai_epi32(simd_cast<__mwi>(sdist0), 31);
@@ -765,14 +789,14 @@ public:
 		__mwi c01 = simd_cast<__mwi>(_mmw_sub_ps(d0, d1));
 		__mwi c02 = simd_cast<__mwi>(_mmw_sub_ps(d0, d2));
 		__mwi c12 = simd_cast<__mwi>(_mmw_sub_ps(d1, d2));
-		// Two tests indicating which layer the incoming triangle will merge with or 
-		// overwrite. d0min indicates that the triangle will overwrite layer 0, and 
+		// Two tests indicating which layer the incoming triangle will merge with or
+		// overwrite. d0min indicates that the triangle will overwrite layer 0, and
 		// d1min flags that the triangle will overwrite layer 1.
 		__mwi d0min = _mmw_or_epi32(_mmw_and_epi32(c01, c02), _mmw_or_epi32(lm0, t0));
 		__mwi d1min = _mmw_andnot_epi32(d0min, _mmw_or_epi32(c12, lm1));
 
 		///////////////////////////////////////////////////////////////////////////////
-		// Update depth buffer entry. NOTE: we always merge into layer 0, so if the 
+		// Update depth buffer entry. NOTE: we always merge into layer 0, so if the
 		// triangle should be merged with layer 1, we first swap layer 0 & 1 and then
 		// merge into layer 0.
 		///////////////////////////////////////////////////////////////////////////////
@@ -826,7 +850,7 @@ public:
 			// Only use the reference layer (layer 0) to cull as it is always conservative
 			__mw zMinBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
 #else
-			// Compute zMin for the overlapped layers 
+			// Compute zMin for the overlapped layers
 			__mwi mask = mMaskedHiZBuffer[tileIdx].mMask;
 			__mw zMin0 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[0], mMaskedHiZBuffer[tileIdx].mZMin[1], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_set1_epi32(~0))));
 			__mw zMin1 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[1], mMaskedHiZBuffer[tileIdx].mZMin[0], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_setzero_epi32())));
@@ -851,6 +875,9 @@ public:
 					__mwi rastMask = _mmw_transpose_epi8(accumulatedMask);
 					__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
 					zPass = _mmw_andnot_epi32(deadLane, zPass);
+#if QUERY_DEBUG_BUFFER != 0
+					mQueryDebugBuffer[tileIdx] = zPass;
+#endif
 
 					if (!_mmw_testz_epi32(zPass, zPass))
 						return CullingResult::VISIBLE;
@@ -861,7 +888,7 @@ public:
 					__mw zSubTileMin = _mmw_max_ps(z0, zTriMin);
 #if QUICK_MASK != 0
 					UpdateTileQuick(tileIdx, accumulatedMask, zSubTileMin);
-#else 
+#else
 					UpdateTileAccurate(tileIdx, accumulatedMask, zSubTileMin);
 #endif
 				}
@@ -1015,7 +1042,7 @@ public:
 					endEvent += endDelta;
 				}
 
-				// Traverse the scanline and update the masked hierarchical z buffer. 
+				// Traverse the scanline and update the masked hierarchical z buffer.
 				if (MID_VTX_RIGHT)
 					cullResult = TraverseScanline<TEST_Z, 2, 1>(start, end, tileRowIdx, 0, 2, triEvent, zTriMin, zTriMax, z0, zx);
 				else
@@ -1200,7 +1227,7 @@ public:
 		__mwi midTileY = _mmw_srai_epi32(_mmw_max_epi32(midPixelY, SIMD_BITS_ZERO), TILE_HEIGHT_SHIFT + FP_BITS);
 		__mwi bbMidTileY = _mmw_max_epi32(bbTileMinY, _mmw_min_epi32(bbTileMaxY, midTileY));
 
-		// Compute edge events for the bottom of the bounding box, or for the middle tile in case of 
+		// Compute edge events for the bottom of the bounding box, or for the middle tile in case of
 		// the edge originating from the middle vertex.
 		__mwi xDiffi[2], yDiffi[2];
 		xDiffi[0] = _mmw_sub_epi32(ipVtxX[0], _mmw_slli_epi32(bbPixelMinX, FP_BITS));
@@ -1223,7 +1250,7 @@ public:
 		slope[2] = _mmw_div_ps(_mmw_cvtepi32_ps(edgeX[2]), _mmw_cvtepi32_ps(edgeY[2]));
 
 		// Modify slope of horizontal edges to make sure they mask out pixels above/below the edge. The slope is set to screen
-		// width to mask out all pixels above or below the horizontal edge. We must also add a small bias to acount for that 
+		// width to mask out all pixels above or below the horizontal edge. We must also add a small bias to acount for that
 		// vertices may end up off screen due to clipping. We're assuming that the round off error is no bigger than 1.0
 		__mw  horizontalSlopeDelta = _mmw_set1_ps(2.0f * ((float)mWidth + 2.0f*(GUARD_BAND_PIXEL_SIZE + 1.0f)));
 		__mwi horizontalSlope0 = _mmw_cmpeq_epi32(edgeY[0], _mmw_setzero_epi32());
@@ -1237,7 +1264,7 @@ public:
 		vy[0] = _mmw_blendv_epi32(yDiffi[0], offset0, horizontalSlope0);
 		vy[1] = _mmw_blendv_epi32(yDiffi[1], offset1, horizontalSlope1);
 
-		// Compute edge events for the bottom of the bounding box, or for the middle tile in case of 
+		// Compute edge events for the bottom of the bounding box, or for the middle tile in case of
 		// the edge originating from the middle vertex.
 		__mwi slopeSign[3], absEdgeX[3];
 		__mwi slopeTileDelta[3], eventStartRemainder[3], slopeTileRemainder[3], eventStart[3];
@@ -1247,8 +1274,8 @@ public:
 			slopeSign[i] = _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(-1), edgeX[i]);
 			absEdgeX[i] = _mmw_abs_epi32(edgeX[i]);
 
-			// Delta and error term for one vertical tile step. The exact delta is exactDelta = edgeX / edgeY, due to limited precision we 
-			// repersent the delta as delta = qoutient + remainder / edgeY, where quotient = int(edgeX / edgeY). In this case, since we step 
+			// Delta and error term for one vertical tile step. The exact delta is exactDelta = edgeX / edgeY, due to limited precision we
+			// repersent the delta as delta = qoutient + remainder / edgeY, where quotient = int(edgeX / edgeY). In this case, since we step
 			// one tile of scanlines at a time, the slope is computed for a tile-sized step.
 			slopeTileDelta[i] = _mmw_cvttps_epi32(_mmw_mul_ps(slope[i], _mmw_set1_ps(FP_TILE_HEIGHT)));
 			slopeTileRemainder[i] = _mmw_sub_epi32(_mmw_slli_epi32(absEdgeX[i], FP_TILE_HEIGHT_SHIFT), _mmw_mullo_epi32(_mmw_abs_epi32(slopeTileDelta[i]), edgeY[i]));
@@ -1296,7 +1323,7 @@ public:
 		slope[2] = _mmw_div_ps(edgeX[2], edgeY[2]);
 
 		// Modify slope of horizontal edges to make sure they mask out pixels above/below the edge. The slope is set to screen
-		// width to mask out all pixels above or below the horizontal edge. We must also add a small bias to acount for that 
+		// width to mask out all pixels above or below the horizontal edge. We must also add a small bias to acount for that
 		// vertices may end up off screen due to clipping. We're assuming that the round off error is no bigger than 1.0
 		__mw horizontalSlopeDelta = _mmw_set1_ps((float)mWidth + 2.0f*(GUARD_BAND_PIXEL_SIZE + 1.0f));
 		slope[0] = _mmw_blendv_ps(slope[0], horizontalSlopeDelta, _mmw_cmpeq_ps(edgeY[0], _mmw_setzero_ps()));
@@ -1308,8 +1335,8 @@ public:
 		slopeFP[1] = _mmw_cvttps_epi32(_mmw_mul_ps(slope[1], _mmw_set1_ps(1 << FP_BITS)));
 		slopeFP[2] = _mmw_cvttps_epi32(_mmw_mul_ps(slope[2], _mmw_set1_ps(1 << FP_BITS)));
 
-		// Fan out edge slopes to avoid (rare) cracks at vertices. We increase right facing slopes 
-		// by 1 LSB, which results in overshooting vertices slightly, increasing triangle coverage. 
+		// Fan out edge slopes to avoid (rare) cracks at vertices. We increase right facing slopes
+		// by 1 LSB, which results in overshooting vertices slightly, increasing triangle coverage.
 		// e0 is always right facing, e1 depends on if the middle vertex is on the left or right
 		slopeFP[0] = _mmw_add_epi32(slopeFP[0], _mmw_set1_epi32(1));
 		slopeFP[1] = _mmw_add_epi32(slopeFP[1], _mmw_srli_epi32(_mmw_not_epi32(simd_cast<__mwi>(edgeY[1])), 31));
@@ -1320,7 +1347,7 @@ public:
 		slopeTileDelta[1] = _mmw_slli_epi32(slopeFP[1], TILE_HEIGHT_SHIFT);
 		slopeTileDelta[2] = _mmw_slli_epi32(slopeFP[2], TILE_HEIGHT_SHIFT);
 
-		// Compute edge events for the bottom of the bounding box, or for the middle tile in case of 
+		// Compute edge events for the bottom of the bounding box, or for the middle tile in case of
 		// the edge originating from the middle vertex.
 		__mwi xDiffi[2], yDiffi[2];
 		xDiffi[0] = _mmw_slli_epi32(_mmw_sub_epi32(_mmw_cvttps_epi32(pVtxX[0]), bbPixelMinX), FP_BITS);
@@ -1444,7 +1471,7 @@ public:
 				int clippedTris = clipHead > clipTail ? clipHead - clipTail : MAX_CLIPPED + clipHead - clipTail;
 				clippedTris = min(clippedTris, SIMD_LANES);
 
-				// Fill out SIMD registers by fetching more triangles. 
+				// Fill out SIMD registers by fetching more triangles.
 				numLanes = max(0, min(SIMD_LANES - clippedTris, nTris - triIndex));
 				if (numLanes > 0) {
 					if (fastGather)
@@ -1500,7 +1527,7 @@ public:
 				continue;
 
 			//////////////////////////////////////////////////////////////////////////////
-			// Project, transform to screen space and perform backface culling. Note 
+			// Project, transform to screen space and perform backface culling. Note
 			// that we use z = 1.0 / vtx.w for depth, which means that z = 0 is far and
 			// z = 1 is near. We must also use a greater than depth test, and in effect
 			// everything is reversed compared to regular z implementations.
@@ -1515,7 +1542,7 @@ public:
 			ProjectVertices(pVtxX, pVtxY, pVtxZ, vtxX, vtxY, vtxW);
 #endif
 
-			// Perform backface test. 
+			// Perform backface test.
 			__mw triArea1 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[1], pVtxX[0]), _mmw_sub_ps(pVtxY[2], pVtxY[0]));
 			__mw triArea2 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[0], pVtxX[2]), _mmw_sub_ps(pVtxY[0], pVtxY[1]));
 			__mw triArea = _mmw_sub_ps(triArea1, triArea2);
@@ -1560,6 +1587,11 @@ public:
 
 	CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
 	{
+#if QUERY_DEBUG_BUFFER != 0
+		// Clear debug buffer (used to visualize queries)
+		memset(&mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
+#endif
+
 		return (CullingResult)RenderTriangles<1>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
@@ -1571,6 +1603,11 @@ public:
 	{
 		STATS_ADD(mStats.mOccludees.mNumProcessedRectangles, 1);
 		assert(mMaskedHiZBuffer != nullptr);
+
+#if QUERY_DEBUG_BUFFER != 0
+		// Clear debug buffer (used to visualize queries)
+		memset(&mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
+#endif
 
 		static const __m128i SIMD_TILE_PAD = _mm_setr_epi32(0, TILE_WIDTH, 0, TILE_HEIGHT);
 		static const __m128i SIMD_TILE_PAD_MASK = _mm_setr_epi32(~(TILE_WIDTH - 1), ~(TILE_WIDTH - 1), ~(TILE_HEIGHT - 1), ~(TILE_HEIGHT - 1));
@@ -1643,6 +1680,9 @@ public:
 				__mwi boxMask = _mmw_and_epi32(bboxTestMin, bboxTestMax);
 				zPass = _mmw_and_epi32(zPass, boxMask);
 
+#if QUERY_DEBUG_BUFFER != 0
+				mQueryDebugBuffer[tileIdx] = zPass;
+#endif
 				// If not all tiles failed the conservative z test we can immediately terminate the test
 				if (!_mmw_testz_epi32(zPass, zPass))
 					return CullingResult::VISIBLE;
@@ -1695,10 +1735,15 @@ public:
 		xmax = max(proj0, proj1);
 	}
 
-	CullingResult TestSphere(float viewCenterX, float viewCenterY, float viewCenterZ, float radius, float xScale, float yScale) const override
+	CullingResult TestSphere(float viewCenterX, float viewCenterY, float viewCenterZ, float viewRadius, float xScale, float yScale) const override
 	{
 		STATS_ADD(mStats.mOccludees.mNumProcessedSpheres, 1);
 		assert(mMaskedHiZBuffer != nullptr);
+
+#if QUERY_DEBUG_BUFFER != 0
+		// Clear debug buffer (used to visualize queries)
+		memset(&mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
+#endif
 
 		static const __m128i SIMD_TILE_PAD = _mm_setr_epi32(0, TILE_WIDTH, 0, TILE_HEIGHT);
 		static const __m128i SIMD_TILE_PAD_MASK = _mm_setr_epi32(~(TILE_WIDTH - 1), ~(TILE_WIDTH - 1), ~(TILE_HEIGHT - 1), ~(TILE_HEIGHT - 1));
@@ -1707,17 +1752,17 @@ public:
 		// Setup sphere-ray intersection and determine if camera is inside sphere
 		//////////////////////////////////////////////////////////////////////////////
 
-		float eqnCx4 = 4.0f*(viewCenterX*viewCenterX + viewCenterY*viewCenterY + viewCenterZ*viewCenterZ - radius*radius);
+		float eqnCx4 = 4.0f*(viewCenterX*viewCenterX + viewCenterY*viewCenterY + viewCenterZ*viewCenterZ - viewRadius*viewRadius);
 		if (eqnCx4 <= 0.0f)
-			return VISIBLE;
+			return VIEW_CULLED; // If inside sphere it's considered BF culled
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Compute clip space bounding rectangle (using circle tangent lines)
 		//////////////////////////////////////////////////////////////////////////////
 
 		float xmin = -1.0f, xmax = 1.0f, ymin = -1.0f, ymax = 1.0f;
-		SphereBounds2D(viewCenterX, viewCenterZ, radius, xScale, xmin, xmax);
-		SphereBounds2D(viewCenterY, viewCenterZ, radius, yScale, ymin, ymax);
+		SphereBounds2D(viewCenterX, viewCenterZ, viewRadius, xScale, xmin, xmax);
+		SphereBounds2D(viewCenterY, viewCenterZ, viewRadius, yScale, ymin, ymax);
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Compute screen space bounding box and guard for out of bounds
@@ -1813,11 +1858,7 @@ public:
 				///////////////////////////////////////////////////////////////////////////////
 				// Test vs contents of HiZ buffer
 				///////////////////////////////////////////////////////////////////////////////
-#if 0
-				mMaskedHiZBuffer[tileIdx].mZMin[0] = _mmw_set1_ps(0.0f);
-				mMaskedHiZBuffer[tileIdx].mZMin[1] = zMax;
-				mMaskedHiZBuffer[tileIdx].mMask = sphereMask;
-#else
+
 				// Fetch zMin from masked hierarchical Z buffer
 #if QUICK_MASK != 0
 				__mw zBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
@@ -1833,10 +1874,13 @@ public:
 				// Mask out lanes corresponding to subtiles outside the bounding box
 				zPass = _mmw_and_epi32(zPass, sphereMask);
 
+#if QUERY_DEBUG_BUFFER != 0
+				mQueryDebugBuffer[tileIdx] = zPass;
+#endif
 				// If not all tiles failed the conservative z test we can immediately terminate the test
 				if (!_mmw_testz_epi32(zPass, zPass))
 					return CullingResult::VISIBLE;
-#endif
+
 				if (++tx >= txMax)
 					break;
 				viewSpaceX = _mmw_add_ps(viewSpaceX, _mmw_set1_ps(viewSpaceTileX));
@@ -1875,7 +1919,7 @@ public:
 		while (triIndex < nTris || clipHead != clipTail)
 		{
 			//////////////////////////////////////////////////////////////////////////////
-			// Assemble triangles from the index list 
+			// Assemble triangles from the index list
 			//////////////////////////////////////////////////////////////////////////////
 			__mw vtxX[3], vtxY[3], vtxW[3];
 			unsigned int triMask = SIMD_ALL_LANES_MASK, triClipMask = SIMD_ALL_LANES_MASK;
@@ -1886,7 +1930,7 @@ public:
 				int clippedTris = clipHead > clipTail ? clipHead - clipTail : MAX_CLIPPED + clipHead - clipTail;
 				clippedTris = min(clippedTris, SIMD_LANES);
 
-				// Fill out SIMD registers by fetching more triangles. 
+				// Fill out SIMD registers by fetching more triangles.
 				numLanes = max(0, min(SIMD_LANES - clippedTris, nTris - triIndex));
 				if (numLanes > 0) {
 					if (fastGather)
@@ -1943,7 +1987,7 @@ public:
 				continue;
 
 			//////////////////////////////////////////////////////////////////////////////
-			// Project, transform to screen space and perform backface culling. Note 
+			// Project, transform to screen space and perform backface culling. Note
 			// that we use z = 1.0 / vtx.w for depth, which means that z = 0 is far and
 			// z = 1 is near. We must also use a greater than depth test, and in effect
 			// everything is reversed compared to regular z implementations.
@@ -1958,7 +2002,7 @@ public:
 			ProjectVertices(pVtxX, pVtxY, pVtxZ, vtxX, vtxY, vtxW);
 #endif
 
-			// Perform backface test. 
+			// Perform backface test.
 			__mw triArea1 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[1], pVtxX[0]), _mmw_sub_ps(pVtxY[2], pVtxY[0]));
 			__mw triArea2 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[0], pVtxX[2]), _mmw_sub_ps(pVtxY[0], pVtxY[1]));
 			__mw triArea = _mmw_sub_ps(triArea1, triArea2);
@@ -2122,6 +2166,32 @@ public:
 				depthData[y * mWidth + x] = pixelDepth;
 			}
 		}
+	}
+
+	void ComputePixelQueryBuffer(unsigned int *queryResult) override
+	{
+#if QUERY_DEBUG_BUFFER != 0
+		assert(mQueryDebugBuffer != nullptr);
+		for (int y = 0; y < mHeight; y++)
+		{
+			for (int x = 0; x < mWidth; x++)
+			{
+				// Compute 32xN tile index (SIMD value offset)
+				int tx = x / TILE_WIDTH;
+				int ty = y / TILE_HEIGHT;
+				int tileIdx = ty * mTilesWidth + tx;
+
+				// Compute 8x4 subtile index (SIMD lane offset)
+				int stx = (x % TILE_WIDTH) / SUB_TILE_WIDTH;
+				int sty = (y % TILE_HEIGHT) / SUB_TILE_HEIGHT;
+				int subTileIdx = sty * 4 + stx;
+
+				depthData[y * mWidth + x] = simd_i32(mQueryDebugBuffer[tileIdx])[subTileIdx] == 0 ? 0 : ~0;
+			}
+		}
+#else
+		UNUSED_PARAMETER(queryResult);
+#endif
 	}
 
 	OcclusionCullingStatistics GetStatistics() override

@@ -21,15 +21,15 @@
 #include "CompilerSpecific.inl"
 
 #if defined(__MICROSOFT_COMPILER) && _MSC_VER < 1900
-	// If you remove/comment this error, the code will compile & use the SSE41 version instead. 
+	// If you remove/comment this error, the code will compile & use the SSE41 version instead.
 	#error Older versions than visual studio 2015 not supported due to compiler bug(s)
 #endif
 
 #if !defined(__MICROSOFT_COMPILER) || _MSC_VER >= 1900
 
-// For performance reasons, the MaskedOcclusionCullingAVX2.cpp file should be compiled with VEX encoding for SSE instructions (to avoid 
+// For performance reasons, the MaskedOcclusionCullingAVX2.cpp file should be compiled with VEX encoding for SSE instructions (to avoid
 // AVX-SSE transition penalties, see https://software.intel.com/en-us/articles/avoiding-avx-sse-transition-penalties). However, the SSE
-// version in MaskedOcclusionCulling.cpp _must_ be compiled without VEX encoding to allow backwards compatibility. Best practice is to 
+// version in MaskedOcclusionCulling.cpp _must_ be compiled without VEX encoding to allow backwards compatibility. Best practice is to
 // use lowest supported target platform (e.g. /arch:SSE2) as project default, and elevate only the MaskedOcclusionCullingAVX2/512.cpp files.
 #ifndef __AVX2__
 	#error For best performance, MaskedOcclusionCullingAVX2.cpp should be compiled with /arch:AVX2
@@ -158,7 +158,7 @@ MAKE_ACCESSOR(simd_i32, __m256i, int, , 8)
 MAKE_ACCESSOR(simd_i32, __m256i, int, const, 8)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Specialized AVX input assembly function for general vertex gather 
+// Specialized AVX input assembly function for general vertex gather
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef MaskedOcclusionCulling::VertexLayout VertexLayout;
@@ -183,7 +183,7 @@ FORCE_INLINE void GatherVertices(__m256 *vtxX, __m256 *vtxY, __m256 *vtxW, const
 	// Compute per-lane index list offset that guards against out of bounds memory accesses
 	__m256i safeTriIdxOffset = _mm256_and_si256(SIMD_TRI_IDX_OFFSET, SIMD_LANE_MASK[numLanes]);
 
-	// Fetch triangle indices. 
+	// Fetch triangle indices.
 	__m256i vtxIdx[3];
 	vtxIdx[0] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 0, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
 	vtxIdx[1] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 1, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
