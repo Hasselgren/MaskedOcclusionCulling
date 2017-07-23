@@ -170,8 +170,24 @@ int main(int argc, char* argv[])
 
 	// Render the occlusion query triangle to show its position
 	moc->RenderTriangles((float*)oqTriVerts, oqTriIndices, 1);
+#if 0
+	// JON TODO: Remove this code
+	moc->TestSphere(-70, -70, 200.0f, 50.0f, 1080.0f / 1920.0f, 1.0f);
 
-	moc->TestSphere(3.2341f, -1.125f, 20.0f, 10.0f, 1080.0f / 1920.0f, 1.0f);
+	unsigned char *imageDbg = new unsigned char[width * height * 3];
+	unsigned int *pixelDbg = new unsigned int[width * height];
+	moc->ComputePixelQueryBuffer(pixelDbg);
+	for (int i = 0; i < width*height; ++i)
+	{
+		if (pixelDbg[i] == 0)
+			imageDbg[i * 3] = 0, imageDbg[i * 3 + 1] = 0, imageDbg[i * 3 + 2] = 0;
+		else if (pixelDbg[i] == 1)
+			imageDbg[i * 3] = 0, imageDbg[i * 3 + 1] = 0, imageDbg[i * 3 + 2] = 255;
+		else if (pixelDbg[i] == 2)
+			imageDbg[i * 3] = 0, imageDbg[i * 3 + 1] = 255, imageDbg[i * 3 + 2] = 0;
+	}
+	WriteBMP("dbg.bmp", imageDbg, width, height);
+#endif
 
 	// Perform an occlusion query testing if a rectangle is visible. The rectangle is completely
 	// behind the previously drawn quad, so the query should indicate that it's occluded

@@ -143,7 +143,7 @@ public:
 	ZTile           *mMaskedHiZBuffer;
 	ScissorRect     mFullscreenScissor;
 #if QUERY_DEBUG_BUFFER != 0
-	__mwi			*mQueryDebugBuffer;
+	__mwi           *mQueryDebugBuffer;
 #endif
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -876,7 +876,8 @@ public:
 					__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
 					zPass = _mmw_andnot_epi32(deadLane, zPass);
 #if QUERY_DEBUG_BUFFER != 0
-					mQueryDebugBuffer[tileIdx] = zPass;
+					__mwi debugVal = _mmw_blendv_epi32(_mmw_set1_epi32(0), _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(2), zPass), _mmw_not_epi32(deadLane));
+					mQueryDebugBuffer[tileIdx] = debugVal;
 #endif
 
 					if (!_mmw_testz_epi32(zPass, zPass))
@@ -1585,14 +1586,17 @@ public:
 		return (CullingResult)RenderTriangles<0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
-	CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
+	CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) const override
 	{
 #if QUERY_DEBUG_BUFFER != 0
-		// Clear debug buffer (used to visualize queries)
-		memset(&mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
+		// Clear debug buffer (used to visualize queries). Cast required because this method is const
+		memset((__mwi*)mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
 #endif
 
-		return (CullingResult)RenderTriangles<1>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
+		// Workaround because the RenderTriangles method is reused for both rendering occluders and performing queries, so it's not declared as const.
+		// Still, it's nice for TestTriangles() to be declared as const to indicate it does not modify the HiZ buffer.
+		MaskedOcclusionCullingPrivate *nonConst = (MaskedOcclusionCullingPrivate *)this;
+		return (CullingResult)nonConst->RenderTriangles<1>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1605,8 +1609,8 @@ public:
 		assert(mMaskedHiZBuffer != nullptr);
 
 #if QUERY_DEBUG_BUFFER != 0
-		// Clear debug buffer (used to visualize queries)
-		memset(&mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
+		// Clear debug buffer (used to visualize queries). Cast required because this method is const
+		memset((__mwi*)mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
 #endif
 
 		static const __m128i SIMD_TILE_PAD = _mm_setr_epi32(0, TILE_WIDTH, 0, TILE_HEIGHT);
@@ -1681,7 +1685,8 @@ public:
 				zPass = _mmw_and_epi32(zPass, boxMask);
 
 #if QUERY_DEBUG_BUFFER != 0
-				mQueryDebugBuffer[tileIdx] = zPass;
+				__mwi debugVal = _mmw_blendv_epi32(_mmw_set1_epi32(0), _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(2), zPass), boxMask);
+				mQueryDebugBuffer[tileIdx] = debugVal;
 #endif
 				// If not all tiles failed the conservative z test we can immediately terminate the test
 				if (!_mmw_testz_epi32(zPass, zPass))
@@ -1741,8 +1746,8 @@ public:
 		assert(mMaskedHiZBuffer != nullptr);
 
 #if QUERY_DEBUG_BUFFER != 0
-		// Clear debug buffer (used to visualize queries)
-		memset(&mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
+		// Clear debug buffer (used to visualize queries). Cast required because this method is const
+		memset((__mwi*)mQueryDebugBuffer, 0, sizeof(__mwi) * mTilesWidth * mTilesHeight);
 #endif
 
 		static const __m128i SIMD_TILE_PAD = _mm_setr_epi32(0, TILE_WIDTH, 0, TILE_HEIGHT);
@@ -1875,7 +1880,8 @@ public:
 				zPass = _mmw_and_epi32(zPass, sphereMask);
 
 #if QUERY_DEBUG_BUFFER != 0
-				mQueryDebugBuffer[tileIdx] = zPass;
+				__mwi debugVal = _mmw_blendv_epi32(_mmw_set1_epi32(0), _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(2), zPass), sphereMask);
+				mQueryDebugBuffer[tileIdx] = debugVal;
 #endif
 				// If not all tiles failed the conservative z test we can immediately terminate the test
 				if (!_mmw_testz_epi32(zPass, zPass))
@@ -2186,7 +2192,7 @@ public:
 				int sty = (y % TILE_HEIGHT) / SUB_TILE_HEIGHT;
 				int subTileIdx = sty * 4 + stx;
 
-				depthData[y * mWidth + x] = simd_i32(mQueryDebugBuffer[tileIdx])[subTileIdx] == 0 ? 0 : ~0;
+				queryResult[y * mWidth + x] = simd_i32(mQueryDebugBuffer[tileIdx])[subTileIdx];
 			}
 		}
 #else

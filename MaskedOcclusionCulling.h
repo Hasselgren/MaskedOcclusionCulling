@@ -90,9 +90,10 @@
 
 #ifndef QUERY_DEBUG_BUFFER
  /*!
-  * Define QUERY_DEBUG_BUFFER to 1 to enable the debug buffer for occlusion qureies. The buffer is cleared
-  * every query, and during the qurey it is filled with the result (occluded = 0, visible != 0) for all processed
-  * pixels. Note that the query terminates after the first visible tile is found.
+  * Define QUERY_DEBUG_BUFFER to 1 to enable the debug buffer for occlusion qureies. The buffer is cleared every
+  * query, and during the qurey it is filled with the result (occluded = 0, occluded = 1, visible = 2) for all
+  * processed pixels. Note that the query terminates after the first visible tile is found, so the debug buffer
+  * may not contain all submitted geometry. Also note that enabling this feature greatly reduces performance.
   */
 #define QUERY_DEBUG_BUFFER  0
 
@@ -407,7 +408,7 @@ public:
 	 *         if the mesh is occluded by a previously rendered object, or VIEW_CULLED if all
 	 *         triangles are entirely outside the view frustum or backface culled.
 	 */
-	virtual CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
+	virtual CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) const = 0;
 
 	/*!
 	 * \brief Perform input assembly, clipping , projection, triangle setup, and write
@@ -479,11 +480,12 @@ public:
 
 	/*!
 	 * \brief Creates a per-pixel buffer containing the result of the last occlusion qurey
-	 *        (TestRect, TestTriangles, TestSphere). This function does nothing unless
-	 *        QUERY_DEBUG_BUFFER define is set.
+	 *        (TestRect, TestTriangles, TestSphere). The possible value for each pixel are:
+	 *        (not processed = 0, occluded = 1, visible = 2). This function does nothing
+	 *        unless the QUERY_DEBUG_BUFFER define is set.
 	 *
 	 * \param queryResult Pointer to memory where the per-pixel qurey data is written. Must
-	 *        hold storage for atleast width*height elements as set by setResolution.
+	 *        hold storage for atleast width*height elements as set by setResolution. 
 	 */
 	virtual void ComputePixelQueryBuffer(unsigned int *queryResult) = 0;
 
