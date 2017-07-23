@@ -15,7 +15,7 @@ The code is optimized for runtime performance and may require a long time to com
 a library file. An alternative solution is to disable *whole program optimizations* for the `MaskedOcclusionCulling.cpp`, 
 `MaskedOcclusionCullingAVX2.cpp` and `MaskedOcclusionCullingAVX512.cpp` files. It does not impact runtime performance, but greatly reduces the time of program linking. 
 
-## <a name="cs"></a>Notes on coordinate systems and winding
+## <a name="cs"></a>Notes on coordinate systems
 
 Most inputs are given as clip space (x,y,w) coordinates assuming the same right handed coordinate system as used by DirectX and OpenGL (x positive right, y
 positive up and w positive in the view direction). Note that we use the clip space w coordinate for depth and disregard the z coordinate. Internally our
