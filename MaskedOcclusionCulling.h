@@ -165,7 +165,7 @@ public:
 	struct VertexLayout
 	{
 		VertexLayout() = default;
-		VertexLayout(int stride, int offsetY, int offsetZW) :
+		VertexLayout(int stride, int offsetY, int offsetZW, int offsetU = 0, int offsetV = 0) :
 			mStride(stride), mOffsetY(offsetY), mOffsetW(offsetZW) {}
 
 		int mStride;      //!< byte stride between vertices
@@ -174,6 +174,8 @@ public:
 			int mOffsetZ; //!< byte offset from X to Z coordinate
 			int mOffsetW; //!< byte offset from X to W coordinate
 		};
+		int mOffsetU;     //!< byte offset from X to U texture coordinate
+		int mOffsetV;     //!< byte offset from X to V texture coordinate
 	};
 
 	/*!
