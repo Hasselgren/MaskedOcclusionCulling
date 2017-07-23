@@ -164,7 +164,7 @@ public:
 	 */
 	struct VertexLayout
 	{
-		VertexLayout() {}
+		VertexLayout() = default;
 		VertexLayout(int stride, int offsetY, int offsetZW) :
 			mStride(stride), mOffsetY(offsetY), mOffsetW(offsetZW) {}
 
@@ -184,7 +184,7 @@ public:
 	 */
 	struct ScissorRect
 	{
-		ScissorRect() {}
+		ScissorRect() = default;
 		ScissorRect(int minX, int minY, int maxX, int maxY) :
 			mMinX(minX), mMinY(minY), mMaxX(maxX), mMaxY(maxY) {}
 
