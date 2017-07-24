@@ -912,9 +912,20 @@ public:
 		coverageMask = _mmw_andnot_epi32(_mmw_srai_epi32(simd_cast<__mwi>(zDist0t), 31), coverageMask);
 		unsigned int subtilesMask = ~_mmw_movemask_ps(simd_cast<__mw>(_mmw_cmpeq_epi32(coverageMask, _mmw_set1_epi32(0))));
 
+		// JON TODO: Slow & not needed
+		float tilePixelX = (float)((tileIdx % mTilesWidth)*TILE_WIDTH) + 0.5f;
+		float tilePixelY = (float)((tileIdx / mTilesWidth)*TILE_HEIGHT) + 0.5f;
+
+		static const float subtileOffsetX[16] = { 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f };
+		static const float subtileOffsetY[16] = { 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 4.0f, 4.0f, 4.0f, 8.0f, 8.0f, 8.0f, 8.0f, 12.0f, 12.0f, 12.0f, 12.0f };
+
 		while (subtilesMask)
 		{
 			unsigned int subtileIdx = find_clear_lsb(&subtileIdx);
+
+			float subtilePixelX = subtileOffsetX[subtileIdx] + tilePixelX;
+			float subtilePixelY = subtileOffsetY[subtileIdx] + tilePixelY;
+
 
 		}
 
