@@ -128,6 +128,11 @@ typedef MaskedOcclusionCulling::VertexLayout    VertexLayout;
 #define SIMD_LANE_YCOORD_I _mm_setr_epi32(128, 384, 640, 896)
 #define SIMD_LANE_YCOORD_F _mm_setr_ps(128.0f, 384.0f, 640.0f, 896.0f)
 
+#define SIMD_PIXEL_WIDTH      2
+#define SIMD_PIXEL_HEIGHT     2
+#define SIMD_PIXEL_COL_OFFSET_F _mm_setr_ps(0, 1, 0, 1)
+#define SIMD_PIXEL_ROW_OFFSET_F _mm_setr_ps(0, 0, 1, 1)
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Common SSE2/SSE4.1 functions
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -148,6 +153,7 @@ typedef __m128i __mwi;
 #define _mmw_sub_ps                 _mm_sub_ps
 #define _mmw_mul_ps                 _mm_mul_ps
 #define _mmw_div_ps                 _mm_div_ps
+#define _mmw_rcp_ps                 _mm_rcp_ps
 #define _mmw_sqrt_ps                _mm_sqrt_ps
 #define _mmw_min_ps                 _mm_min_ps
 #define _mmw_max_ps                 _mm_max_ps

@@ -204,7 +204,7 @@ public:
 	{
 		unsigned int mNumTriangles; //!< Maximum number of triangles that may be stored in mPtr
 		unsigned int mTriIdx;       //!< Index of next triangle to be written, clear before calling BinTriangles to start from the beginning of the list
-		float		 *mPtr;         //!< Scratchpad buffer allocated by the host application
+		float        *mPtr;         //!< Scratchpad buffer allocated by the host application
 	};
 
 	/*!
@@ -229,6 +229,13 @@ public:
 			long long mNumRasterizedTriangles; //!< Number of ocludee triangle passing view frustum and backface culling
 			long long mNumTilesTraversed;      //!< Number of tiles traversed by triangle & rect rasterizers
 		} mOccludees;
+	};
+
+	struct OcclusionTexture
+	{
+		unsigned int mWidth;
+		unsigned int mHeight;
+		unsigned int *mData;
 	};
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

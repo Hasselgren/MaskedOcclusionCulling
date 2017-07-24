@@ -54,6 +54,11 @@
 #define SIMD_LANE_YCOORD_I _mm256_setr_epi32(128, 384, 640, 896, 1152, 1408, 1664, 1920)
 #define SIMD_LANE_YCOORD_F _mm256_setr_ps(128.0f, 384.0f, 640.0f, 896.0f, 1152.0f, 1408.0f, 1664.0f, 1920.0f)
 
+#define SIMD_PIXEL_WIDTH      4
+#define SIMD_PIXEL_HEIGHT     2
+#define SIMD_PIXEL_COL_OFFSET_F _mm256_setr_ps(0, 1, 2, 3, 0, 1, 2, 3)
+#define SIMD_PIXEL_ROW_OFFSET_F _mm256_setr_ps(0, 0, 0, 0, 1, 1, 1, 1)
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // AVX specific typedefs and functions
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -74,6 +79,7 @@ typedef __m256i __mwi;
 #define _mmw_sub_ps                 _mm256_sub_ps
 #define _mmw_mul_ps                 _mm256_mul_ps
 #define _mmw_div_ps                 _mm256_div_ps
+#define _mmw_rcp_ps                 _mm256_rcp_ps
 #define _mmw_sqrt_ps                _mm256_sqrt_ps
 #define _mmw_min_ps                 _mm256_min_ps
 #define _mmw_max_ps                 _mm256_max_ps
