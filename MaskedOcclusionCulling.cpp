@@ -134,7 +134,7 @@ typedef MaskedOcclusionCulling::VertexLayout    VertexLayout;
 #define SIMD_PIXEL_ROW_OFFSET_F _mm_setr_ps(0, 0, 1, 1)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Common SSE2/SSE4.1 functions
+// Common SSE2/SSE4.1 defines 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef __m128 __mw;
@@ -193,7 +193,7 @@ typedef __m128i __mwi;
 #define _mmx_min_epi32              _mmw_min_epi32
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// SIMD casting functions
+// Common SSE2/SSE4.1 functions
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, typename Y> FORCE_INLINE T simd_cast(Y A);
@@ -270,6 +270,25 @@ namespace MaskedOcclusionCullingSSE41
 		__m128i retMask = _mm_shuffle_epi8(byteShiftLUT, byteShift);
 
 		return retMask;
+	}
+	FORCE_INLINE __m128i _mmw_srlv_epi32(__m128i val, __m128i shift)
+	{
+		simd_i32(val)[0] = ((unsigned int)simd_i32(val)[0] >> (unsigned int)simd_i32(shift)[0]);
+		simd_i32(val)[1] = ((unsigned int)simd_i32(val)[1] >> (unsigned int)simd_i32(shift)[1]);
+		simd_i32(val)[2] = ((unsigned int)simd_i32(val)[2] >> (unsigned int)simd_i32(shift)[2]);
+		simd_i32(val)[3] = ((unsigned int)simd_i32(val)[3] >> (unsigned int)simd_i32(shift)[3]);
+		return val;
+	}
+
+	FORCE_INLINE __m128i _mmw_i32gather_epi32(const int *ptr, __m128i offset, int scale)
+	{
+		__m128i result;
+		__m128i scaledOffset = _mm_mullo_epi32(offset, _mm_set1_epi32(scale));
+		simd_i32(result)[0] = *((const int*)((const char*)ptr + simd_i32(scaledOffset)[0]));
+		simd_i32(result)[1] = *((const int*)((const char*)ptr + simd_i32(scaledOffset)[1]));
+		simd_i32(result)[2] = *((const int*)((const char*)ptr + simd_i32(scaledOffset)[2]));
+		simd_i32(result)[3] = *((const int*)((const char*)ptr + simd_i32(scaledOffset)[3]));
+		return result;
 	}
 
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::SSE41;
@@ -373,6 +392,24 @@ namespace MaskedOcclusionCullingSSE2
 		simd_i32(retMask)[2] = (int)maskLUT[simd_i32(shift)[2]];
 		simd_i32(retMask)[3] = (int)maskLUT[simd_i32(shift)[3]];
 		return retMask;
+	}
+	FORCE_INLINE __m128i _mmw_srlv_epi32(__m128i val, __m128i shift)
+	{
+		simd_i32(val)[0] = ((unsigned int)simd_i32(val)[0] >> (unsigned int)simd_i32(shift)[0]);
+		simd_i32(val)[1] = ((unsigned int)simd_i32(val)[1] >> (unsigned int)simd_i32(shift)[1]);
+		simd_i32(val)[2] = ((unsigned int)simd_i32(val)[2] >> (unsigned int)simd_i32(shift)[2]);
+		simd_i32(val)[3] = ((unsigned int)simd_i32(val)[3] >> (unsigned int)simd_i32(shift)[3]);
+		return val;
+	}
+
+	FORCE_INLINE __m128i _mmw_i32gather_epi32(const int *ptr, __m128i offset, int scale)
+	{
+		__m128i result;
+		simd_i32(result)[0] = *((const int*)((const char*)ptr + simd_i32(offset)[0]*scale));
+		simd_i32(result)[1] = *((const int*)((const char*)ptr + simd_i32(offset)[1]*scale));
+		simd_i32(result)[2] = *((const int*)((const char*)ptr + simd_i32(offset)[2]*scale));
+		simd_i32(result)[3] = *((const int*)((const char*)ptr + simd_i32(offset)[3]*scale));
+		return result;
 	}
 
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::SSE2;

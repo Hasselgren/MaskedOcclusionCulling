@@ -26,6 +26,8 @@ template<typename T> FORCE_INLINE T min(const T &a, const T &b) { return a < b ?
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define SIMD_ALL_LANES_MASK    ((1 << SIMD_LANES) - 1)
+#define SIMD_LOW_HALF_MASK     ((1 << (SIMD_LANES/2)) - 1)
+#define SIMD_HIGH_HALF_MASK    (SIMD_ALL_LANES_MASK & ~SIMD_LOW_HALF_MASK)
 
 // Tile dimensions are 32xN pixels. These values are not tweakable and the code must also be modified
 // to support different tile sizes as it is tightly coupled with the SSE/AVX register size
@@ -923,8 +925,7 @@ public:
 	/*
 	 *
 	 */
-	FORCE_INLINE __mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t,
-		Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant, const OcclusionTexture *texture)
+	FORCE_INLINE __mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t, Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant, const OcclusionTexture *texture)
 	{
 		// Do z-cull. The texture lookup is expensive, so we want to remove as much work as possible
 		coverageMask = _mmw_andnot_epi32(_mmw_srai_epi32(simd_cast<__mwi>(zDist0t), 31), coverageMask);
@@ -941,16 +942,25 @@ public:
 		{
 			unsigned int subtileIdx = find_clear_lsb(&subtileIdx);
 
-			unsigned int subtileCoverageMask = (unsigned int)simd_i32(coverageMask)[subtileIdx];
-
 			float subtilePixelX = subtileOffsetX[subtileIdx] + tilePixelX;
 			float subtilePixelY = subtileOffsetY[subtileIdx] + tilePixelY;
+
+			unsigned int textureCoverageMask = 0;
+			unsigned int subtileCoverageMask = (unsigned int)simd_i32(coverageMask)[subtileIdx];
 
 			for (int py = 0; py < 4; py += SIMD_PIXEL_HEIGHT)
 			{
 				for (int px = 0; px < 8; px += SIMD_PIXEL_WIDTH)
 				{
-					//unsigned int mask = (subtileCoverageMask >> ) & SIMD_ALL_LANES_MASK;
+					///////////////////////////////////////////////////////////////////////////////
+					// Early exit if mask is already zero
+					///////////////////////////////////////////////////////////////////////////////
+
+					unsigned int bitIdx0 = (px / 8) + (py * 8);
+					unsigned int bitIdx1 = (px / 8) + (py * 8) + 4;
+					unsigned int mask = ((subtileCoverageMask >> bitIdx0) & SIMD_LOW_HALF_MASK) | ((subtileCoverageMask >> bitIdx1) & SIMD_HIGH_HALF_MASK);
+					if (!mask)
+						continue;
 
 					///////////////////////////////////////////////////////////////////////////////
 					// Interpolation
@@ -970,20 +980,18 @@ public:
 					///////////////////////////////////////////////////////////////////////////////
 
 					// Compute derivatives using finite differences
-					__mw u0 = _mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), u);
-					__mw v0 = _mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), v);
-					
-					__mw dudx = _mmw_sub_ps(_mmw_shuffle_ps(u0, u0, _MM_SHUFFLE(2, 3, 0, 1)), u0);
-					__mw dvdx = _mmw_sub_ps(_mmw_shuffle_ps(v0, v0, _MM_SHUFFLE(2, 3, 0, 1)), v0);
-					__mw dudy = _mmw_sub_ps(_mmw_shuffle_ps(u0, u0, _MM_SHUFFLE(1, 0, 3, 2)), u0);
-					__mw dvdy = _mmw_sub_ps(_mmw_shuffle_ps(v0, v0, _MM_SHUFFLE(1, 0, 3, 2)), v0);
+					__mw dudx = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(u, u, _MM_SHUFFLE(2, 3, 0, 1)), u));
+					__mw dvdx = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(v, v, _MM_SHUFFLE(2, 3, 0, 1)), v));
+					__mw dudy = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(u, u, _MM_SHUFFLE(1, 0, 3, 2)), u));
+					__mw dvdy = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(v, v, _MM_SHUFFLE(1, 0, 3, 2)), v));
 
 					// Compute max length of derivative
-					__mw maxLen2 = _mmw_max_ps(_mmw_fmadd_ps(dudx, dudx, _mmw_mul_ps(dvdx, dvdx)), _mmw_fmadd_ps(dudy, dudy, _mmw_mul_ps(dvdy, dvdy)));
-					__mwi maxLen = _mmw_cvtps_epi32(_mmw_sqrt_ps(maxLen2));
+					__mw maxLen = _mmw_add_ps(_mmw_max_ps(dudx, dudy), _mmw_max_ps(dvdx, dvdy)); // TODO: This is the upper bound for the lod computation according to OpenGL 4.4 spec
 
-					// Compute mip level
-					__mwi mipLevel = ComputeMiplevel(maxLen);
+					// Compute mip level, the log2 is computed by getting the fp32 exponent
+					__mwi exponentIEEE = _mmw_sub_epi32(_mmw_srli_epi32(simd_cast<__mwi>(maxLen), 23), _mmw_set1_epi32(127));
+					__mwi mipLevel = _mmw_sub_epi32(_mmw_set1_epi32(texture->mMipLevels - 1), exponentIEEE);
+					mipLevel = _mmw_max_epi32(_mmw_setzero_epi32(), _mmw_min_epi32(_mmw_set1_epi32(texture->mMipLevels - 1), mipLevel));
 
 					///////////////////////////////////////////////////////////////////////////////
 					// Texture address calculation
@@ -1003,18 +1011,29 @@ public:
 					__mwi viN = _mmw_srlv_epi32(vi0, mipLevel);
 
 					// Compute texture address for each lookup
-					__mwi mipLevelOffset;
-					__mwi offset = _mmw_add_epi32(_mmw_add_epi32(_mmw_mullo_epi32(viN, textureWidthN), uiN), mipLevelOffset);
+					__mwi mipLevelOffset = _mmw_i32gather_epi32((const int*)texture->mMiplevelOffset, mipLevel, 4);
+					__mwi texelOffset = _mmw_add_epi32(_mmw_add_epi32(_mmw_mullo_epi32(viN, textureWidthN), uiN), mipLevelOffset);
 
 					///////////////////////////////////////////////////////////////////////////////
-					// Texture lookup
+					// Texture lookup & "alpha test"
 					///////////////////////////////////////////////////////////////////////////////
 
+					__mwi textureVal = _mmw_and_epi32(_mmw_set1_epi32(0xFF), _mmw_i32gather_epi32((const int*)texture->mData, texelOffset, 1));
+					unsigned int textureMask = _mmw_movemask_ps(simd_cast<__mw>(_mmw_cmpeq_epi32(textureVal, _mmw_setzero_epi32())));
 
-
+					///////////////////////////////////////////////////////////////////////////////
+					// Swizzle texture mask & accumulate result
+					///////////////////////////////////////////////////////////////////////////////
+					
+					textureCoverageMask |= ((textureMask & SIMD_LOW_HALF_MASK) << bitIdx0) | ((textureMask & SIMD_HIGH_HALF_MASK) << bitIdx1);
 				}
 			}
+
+			// Update SIMD lane of coverage mask
+			simd_i32(coverageMask)[subtileIdx] &= textureCoverageMask;
 		}
+
+		return coverageMask;
 	}
 
 	/*

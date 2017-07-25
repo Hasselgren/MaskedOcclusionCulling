@@ -233,8 +233,12 @@ public:
 
 	struct OcclusionTexture
 	{
+		static const int MAX_MIPLEVELS = 16;         //!< Max number of miplevels (64k x 64k texture)
+
 		unsigned int mWidth;
 		unsigned int mHeight;
+		unsigned int mMipLevels;
+		unsigned int mMiplevelOffset[MAX_MIPLEVELS]; //!< Pointer offset to certain miplevel
 		unsigned int *mData;
 	};
 

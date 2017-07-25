@@ -96,6 +96,7 @@ typedef __m256i __mwi;
 #define _mmw_insertf32x4_ps         _mm256_insertf128_ps
 #define _mmw_cvtepi32_ps            _mm256_cvtepi32_ps
 #define _mmw_blendv_epi32(a,b,c)    simd_cast<__mwi>(_mmw_blendv_ps(simd_cast<__mw>(a), simd_cast<__mw>(b), simd_cast<__mw>(c)))
+#define _mmw_i32gather_epi32        _mm256_i32gather_epi32
 
 #define _mmw_set1_epi32             _mm256_set1_epi32
 #define _mmw_setzero_epi32          _mm256_setzero_si256
@@ -207,11 +208,6 @@ namespace MaskedOcclusionCullingAVX2
 			vtxY[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetY), vtxIdx[i], 1);
 			vtxW[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetW), vtxIdx[i], 1);
 		}
-	}
-
-	FORCE_INLINE __m256i ComputeMiplevel(__m256i maxLen)
-	{
-
 	}
 
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::AVX2;
