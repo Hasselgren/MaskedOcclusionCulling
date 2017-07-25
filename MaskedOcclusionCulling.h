@@ -233,11 +233,19 @@ public:
 
 	struct OcclusionTexture
 	{
-		unsigned int  mWidth;                  //!< Width of image (in texels)
-		unsigned int  mHeight;                 //!< Height of image (in texels)
-		unsigned int  mMipLevels;              //!< Total number of mip levels
-		unsigned int  mMiplevelOffset[16];     //!< Data offset to certain mip level
-		unsigned char *mData;                  //!< Raw data pointer. Data is one byte per texel, TODO: pack to 1 bit per texel?
+		pfnAlignedAlloc mAlignedAllocCallback;
+		pfnAlignedFree  mAlignedFreeCallback;
+
+		unsigned int    mWidth;                  //!< Width of image (in texels)
+		unsigned int    mHeight;                 //!< Height of image (in texels)
+		unsigned int    mMipLevels;              //!< Total number of mip levels
+		unsigned int    mMiplevelOffset[16];     //!< Data offset to certain mip level
+		unsigned char   *mOcclusionData;         //!< Raw data pointer. Data is one byte per texel, TODO: pack to 1 bit per texel?
+
+		OcclusionTexture() = delete;           // Must create texture objects using MaskedOcclusionCulling::CreateTexture()
+	
+		void GenerateAllMipmaps(const unsigned char *data, float alphaThreshold);
+		void SetMipLevel(unsigned int mipLevel, const unsigned char *data, float alphaThreshold);
 	};
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -264,11 +272,11 @@ public:
 
 	/*!
 	 */
-	static OcclusionTexture *CreateTexture(int width, int height, const unsigned char *data);
+	static OcclusionTexture *CreateTexture(unsigned int width, unsigned int height);
 
 	/*!
 	 */
-	static OcclusionTexture *CreateTexture(int width, int height, const unsigned char *data, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree);
+	static OcclusionTexture *CreateTexture(unsigned int width, unsigned int height, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree);
 
 	/*!
 	 * \brief Sets the resolution of the hierarchical depth buffer. This function will

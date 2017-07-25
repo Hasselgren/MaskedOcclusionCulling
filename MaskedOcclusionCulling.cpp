@@ -445,14 +445,97 @@ void MaskedOcclusionCulling::Destroy(MaskedOcclusionCulling *moc)
 // Texture creation functions
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(int width, int height, const unsigned char *data)
+MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(unsigned int width, unsigned int height)
 {
-	return CreateTexture(width, height, data, aligned_alloc, aligned_free);
+	return CreateTexture(width, height, aligned_alloc, aligned_free);
 }
 
-MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(int width, int height, const unsigned char *data, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree)
+MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(unsigned int width, unsigned int height, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree)
 {
-	return nullptr;
+	assert(width > 0 && height > 0);
+
+	// Allocate texture object
+	OcclusionTexture *texture = (OcclusionTexture *)alignedAlloc(64, sizeof(OcclusionTexture));
+	if (texture == nullptr)
+		return texture;
+
+	texture->mAlignedAllocCallback = alignedAlloc;
+	texture->mAlignedFreeCallback = alignedFree;
+	texture->mWidth = width;
+	texture->mHeight = height;
+	texture->mMipLevels = 1 + (int)floor(log2f(max((float)width, (float)height)));
+
+	// Compute mip level offsets & size of entire mip chain
+	int totalSize = 0, mipWidth = width, mipHeight = height;
+	for (unsigned int mip = 0; mip < texture->mMipLevels; ++mip)
+	{
+		texture->mMiplevelOffset[mip] = totalSize;
+		totalSize += mipWidth*mipHeight;
+		mipWidth = max(1, mipWidth / 2);
+		mipHeight = max(1, mipHeight / 2);
+	}
+	
+	// Allocate memory for entire mip chain
+	texture->mData = (unsigned char *)alignedAlloc(64, sizeof(unsigned char)*totalSize);
+	if (texture->mData == nullptr) 
+	{
+		alignedFree(texture);
+		return nullptr;
+	}
+
+	return texture;
+}
+
+void OcclusionTexture_FilterCorrection(int width, int height, unsigned char *data, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree)
+{
+	unsigned char *tmpData = (unsigned char*)alignedAlloc(64, sizeof(unsigned char)*width*height);
+	memcpy(tmpData, data, sizeof(unsigned char)*width*height);
+
+	for (int y = 0; y < height; ++y)
+	{
+		for (int x = 0; x < width; ++x)
+		{
+			// Search a n8 filter to make things robust to bilinear filtering
+			int occluded = 0;
+			for (int dy = -1; dy < 1; ++dy)
+			{
+				for (int dx = -1; dx < 1; ++dx)
+				{
+					int tx = x + dx;
+					int ty = y + dy;
+					tx = tx < 0 ? (width + tx) : (tx >= width ? tx - width : tx);
+					ty = ty < 0 ? (height + ty) : (ty >= height ? ty - height : ty);
+					occluded |= tmpData[tx + ty*width];
+				}
+			}
+			data[x + y*width] = occluded;
+		}
+	}
+
+	alignedFree(tmpData);
+}
+
+void MaskedOcclusionCulling::OcclusionTexture::GenerateAllMipmaps(const unsigned char *data, float alphaThreshold)
+{
+	// Compute occlusion for miplevel 0
+	for (unsigned int y = 0; y < mHeight; ++y)
+		for (unsigned int x = 0; x < mWidth; ++x)
+			mOcclusionData[x + y*mWidth + mMiplevelOffset[0]] = ((float)data[x + y*mWidth] / 255.0f) > alphaThreshold ? 1 : 0;
+
+	// 
+
+}
+
+void MaskedOcclusionCulling::OcclusionTexture::SetMipLevel(unsigned int mipLevel, const unsigned char *data, float alphaThreshold)
+{
+	unsigned int mipWidth = max(1u, mWidth >> mipLevel);
+	unsigned int mipHeight = max(1u, mHeight >> mipLevel);
+
+	for (unsigned int y = 0; y < mipHeight; ++y)
+		for (unsigned int x = 0; x < mipWidth; ++x)
+			mOcclusionData[x + y*mipWidth + mMiplevelOffset[mipLevel]] = ((float)data[x + y*mipWidth] / 255.0f) > alphaThreshold ? 1 : 0;
+
+	OcclusionTexture_FilterCorrection((int)mipWidth, (int)mipHeight, &mOcclusionData[mMiplevelOffset[mipLevel]], mAlignedAllocCallback, mAlignedFreeCallback);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
