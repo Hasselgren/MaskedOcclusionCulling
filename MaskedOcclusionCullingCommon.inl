@@ -920,8 +920,11 @@ public:
 		zMin[1] = _mmw_blendv_ps(z1t, z0, simd_cast<__mw>(d1min));
 	}
 
-	FORCE_INLINE __mwi TextureLookup(const OcclusionTexture *texture, int tileIdx, __mwi coverageMask, __mw zDist0t,
-		Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant)
+	/*
+	 *
+	 */
+	FORCE_INLINE __mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t,
+		Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant, const OcclusionTexture *texture)
 	{
 		// Do z-cull. The texture lookup is expensive, so we want to remove as much work as possible
 		coverageMask = _mmw_andnot_epi32(_mmw_srai_epi32(simd_cast<__mwi>(zDist0t), 31), coverageMask);
@@ -938,6 +941,8 @@ public:
 		{
 			unsigned int subtileIdx = find_clear_lsb(&subtileIdx);
 
+			unsigned int subtileCoverageMask = (unsigned int)simd_i32(coverageMask)[subtileIdx];
+
 			float subtilePixelX = subtileOffsetX[subtileIdx] + tilePixelX;
 			float subtilePixelY = subtileOffsetY[subtileIdx] + tilePixelY;
 
@@ -945,6 +950,12 @@ public:
 			{
 				for (int px = 0; px < 8; px += SIMD_PIXEL_WIDTH)
 				{
+					//unsigned int mask = (subtileCoverageMask >> ) & SIMD_ALL_LANES_MASK;
+
+					///////////////////////////////////////////////////////////////////////////////
+					// Interpolation
+					///////////////////////////////////////////////////////////////////////////////
+
 					// Compute pixel coordinates
 					__mw pixelX = _mmw_add_ps(_mmw_set1_ps(subtilePixelX + px), SIMD_PIXEL_COL_OFFSET_F);
 					__mw pixelY = _mmw_add_ps(_mmw_set1_ps(subtilePixelY + py), SIMD_PIXEL_COL_OFFSET_F);
@@ -954,17 +965,56 @@ public:
 					__mw u = _mmw_mul_ps(rcpZ, uInterpolant.interpolate(pixelX, pixelY));
 					__mw v = _mmw_mul_ps(rcpZ, vInterpolant.interpolate(pixelX, pixelY));
 
-					// Apply texture wrapping mode (currently only repeat is supported)
+					///////////////////////////////////////////////////////////////////////////////
+					// Mip level computation
+					///////////////////////////////////////////////////////////////////////////////
+
+					// Compute derivatives using finite differences
+					__mw u0 = _mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), u);
+					__mw v0 = _mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), v);
+					
+					__mw dudx = _mmw_sub_ps(_mmw_shuffle_ps(u0, u0, _MM_SHUFFLE(2, 3, 0, 1)), u0);
+					__mw dvdx = _mmw_sub_ps(_mmw_shuffle_ps(v0, v0, _MM_SHUFFLE(2, 3, 0, 1)), v0);
+					__mw dudy = _mmw_sub_ps(_mmw_shuffle_ps(u0, u0, _MM_SHUFFLE(1, 0, 3, 2)), u0);
+					__mw dvdy = _mmw_sub_ps(_mmw_shuffle_ps(v0, v0, _MM_SHUFFLE(1, 0, 3, 2)), v0);
+
+					// Compute max length of derivative
+					__mw maxLen2 = _mmw_max_ps(_mmw_fmadd_ps(dudx, dudx, _mmw_mul_ps(dvdx, dvdx)), _mmw_fmadd_ps(dudy, dudy, _mmw_mul_ps(dvdy, dvdy)));
+					__mwi maxLen = _mmw_cvtps_epi32(_mmw_sqrt_ps(maxLen2));
+
+					// Compute mip level
+					__mwi mipLevel = ComputeMiplevel(maxLen);
+
+					///////////////////////////////////////////////////////////////////////////////
+					// Texture address calculation
+					///////////////////////////////////////////////////////////////////////////////
+
+					// Apply wrapping mode (currently only repeat is supported)
 					__mw wrappedU = _mmw_sub_ps(u, _mmw_floor_ps(u));
 					__mw wrappedV = _mmw_sub_ps(v, _mmw_floor_ps(v));
 
-					__mw uMip0 = _mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), wrappedU);
-					__mw vMip0 = _mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), wrappedV);
+					// Compute miplevel 0 coordinate
+					__mwi ui0 = _mmw_cvttps_epi32(_mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), wrappedU));
+					__mwi vi0 = _mmw_cvttps_epi32(_mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), wrappedV));
+
+					// Scale coordinate by miplevel
+					__mwi textureWidthN = _mmw_srlv_epi32(_mmw_set1_epi32(texture->mWidth), mipLevel);
+					__mwi uiN = _mmw_srlv_epi32(ui0, mipLevel);
+					__mwi viN = _mmw_srlv_epi32(vi0, mipLevel);
+
+					// Compute texture address for each lookup
+					__mwi mipLevelOffset;
+					__mwi offset = _mmw_add_epi32(_mmw_add_epi32(_mmw_mullo_epi32(viN, textureWidthN), uiN), mipLevelOffset);
+
+					///////////////////////////////////////////////////////////////////////////////
+					// Texture lookup
+					///////////////////////////////////////////////////////////////////////////////
+
+
 
 				}
 			}
 		}
-
 	}
 
 	/*
@@ -1020,7 +1070,7 @@ public:
 
 				// Perform conservative texture lookup for alpha tested triangles
 				if (TEXTURE_COORDINATES)
-					accumulatedMask = _mmw_and_epi32(accumulatedMask, TextureLookup(texture, tileIdx, accumulatedMask, dist0, zInterpolant, uInterpolant, vInterpolant));
+					accumulatedMask = _mmw_and_epi32(accumulatedMask, TextureLookup(tileIdx, accumulatedMask, dist0, zInterpolant, uInterpolant, vInterpolant, texture));
 
 				if (TEST_Z)
 				{

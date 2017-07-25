@@ -56,8 +56,8 @@
 
 #define SIMD_PIXEL_WIDTH      4
 #define SIMD_PIXEL_HEIGHT     2
-#define SIMD_PIXEL_COL_OFFSET_F _mm256_setr_ps(0, 1, 2, 3, 0, 1, 2, 3)
-#define SIMD_PIXEL_ROW_OFFSET_F _mm256_setr_ps(0, 0, 0, 0, 1, 1, 1, 1)
+#define SIMD_PIXEL_COL_OFFSET_F _mm256_setr_ps(0, 1, 0, 1, 2, 3, 2, 3)
+#define SIMD_PIXEL_ROW_OFFSET_F _mm256_setr_ps(0, 0, 1, 1, 0, 0, 1, 1)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // AVX specific typedefs and functions
@@ -122,6 +122,7 @@ typedef __m256i __mwi;
 #define _mmw_abs_epi32              _mm256_abs_epi32
 #define _mmw_cvtps_epi32            _mm256_cvtps_epi32
 #define _mmw_cvttps_epi32           _mm256_cvttps_epi32
+#define _mmw_srlv_epi32(x, y)       _mm256_srlv_epi32(x, y)
 
 #define _mmx_dp4_ps(a, b)           _mm_dp_ps(a, b, 0xFF)
 #define _mmx_fmadd_ps               _mm_fmadd_ps
@@ -169,45 +170,50 @@ MAKE_ACCESSOR(simd_i32, __m256i, int, const, 8)
 
 typedef MaskedOcclusionCulling::VertexLayout VertexLayout;
 
-FORCE_INLINE void GatherVertices(__m256 *vtxX, __m256 *vtxY, __m256 *vtxW, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
-{
-	assert(numLanes >= 1);
-
-	const __m256i SIMD_TRI_IDX_OFFSET = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
-	static const __m256i SIMD_LANE_MASK[9] = {
-		_mm256_setr_epi32( 0,  0,  0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0,  0,  0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0,  0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0,  0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0,  0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0,  0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0,  0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0,  0),
-		_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0)
-	};
-
-	// Compute per-lane index list offset that guards against out of bounds memory accesses
-	__m256i safeTriIdxOffset = _mm256_and_si256(SIMD_TRI_IDX_OFFSET, SIMD_LANE_MASK[numLanes]);
-
-	// Fetch triangle indices.
-	__m256i vtxIdx[3];
-	vtxIdx[0] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 0, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
-	vtxIdx[1] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 1, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
-	vtxIdx[2] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 2, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
-
-	char *vPtr = (char *)inVtx;
-
-	// Fetch triangle vertices
-	for (int i = 0; i < 3; i++)
-	{
-		vtxX[i] = _mm256_i32gather_ps((float *)vPtr, vtxIdx[i], 1);
-		vtxY[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetY), vtxIdx[i], 1);
-		vtxW[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetW), vtxIdx[i], 1);
-	}
-}
-
 namespace MaskedOcclusionCullingAVX2
 {
+	FORCE_INLINE void GatherVertices(__m256 *vtxX, __m256 *vtxY, __m256 *vtxW, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
+	{
+		assert(numLanes >= 1);
+
+		const __m256i SIMD_TRI_IDX_OFFSET = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
+		static const __m256i SIMD_LANE_MASK[9] = {
+			_mm256_setr_epi32(0,  0,  0,  0,  0,  0,  0,  0),
+			_mm256_setr_epi32(~0,  0,  0,  0,  0,  0,  0,  0),
+			_mm256_setr_epi32(~0, ~0,  0,  0,  0,  0,  0,  0),
+			_mm256_setr_epi32(~0, ~0, ~0,  0,  0,  0,  0,  0),
+			_mm256_setr_epi32(~0, ~0, ~0, ~0,  0,  0,  0,  0),
+			_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0,  0,  0,  0),
+			_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0,  0,  0),
+			_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0,  0),
+			_mm256_setr_epi32(~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0)
+		};
+
+		// Compute per-lane index list offset that guards against out of bounds memory accesses
+		__m256i safeTriIdxOffset = _mm256_and_si256(SIMD_TRI_IDX_OFFSET, SIMD_LANE_MASK[numLanes]);
+
+		// Fetch triangle indices.
+		__m256i vtxIdx[3];
+		vtxIdx[0] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 0, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
+		vtxIdx[1] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 1, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
+		vtxIdx[2] = _mmw_mullo_epi32(_mm256_i32gather_epi32((const int*)inTrisPtr + 2, safeTriIdxOffset, 4), _mmw_set1_epi32(vtxLayout.mStride));
+
+		char *vPtr = (char *)inVtx;
+
+		// Fetch triangle vertices
+		for (int i = 0; i < 3; i++)
+		{
+			vtxX[i] = _mm256_i32gather_ps((float *)vPtr, vtxIdx[i], 1);
+			vtxY[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetY), vtxIdx[i], 1);
+			vtxW[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetW), vtxIdx[i], 1);
+		}
+	}
+
+	FORCE_INLINE __m256i ComputeMiplevel(__m256i maxLen)
+	{
+
+	}
+
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::AVX2;
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
