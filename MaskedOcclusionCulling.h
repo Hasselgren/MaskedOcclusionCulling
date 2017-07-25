@@ -233,13 +233,11 @@ public:
 
 	struct OcclusionTexture
 	{
-		static const int MAX_MIPLEVELS = 16;         //!< Max number of miplevels (64k x 64k texture)
-
-		unsigned int mWidth;
-		unsigned int mHeight;
-		unsigned int mMipLevels;
-		unsigned int mMiplevelOffset[MAX_MIPLEVELS]; //!< Pointer offset to certain miplevel
-		unsigned int *mData;
+		unsigned int  mWidth;                  //!< Width of image (in texels)
+		unsigned int  mHeight;                 //!< Height of image (in texels)
+		unsigned int  mMipLevels;              //!< Total number of mip levels
+		unsigned int  mMiplevelOffset[16];     //!< Data offset to certain mip level
+		unsigned char *mData;                  //!< Raw data pointer. Data is one byte per texel, TODO: pack to 1 bit per texel?
 	};
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -263,6 +261,14 @@ public:
 	 * use the delete operator, and should rather use this function to free up memory.
 	 */
 	static void Destroy(MaskedOcclusionCulling *moc);
+
+	/*!
+	 */
+	static OcclusionTexture *CreateTexture(int width, int height, const unsigned char *data);
+
+	/*!
+	 */
+	static OcclusionTexture *CreateTexture(int width, int height, const unsigned char *data, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree);
 
 	/*!
 	 * \brief Sets the resolution of the hierarchical depth buffer. This function will
@@ -345,6 +351,8 @@ public:
 	 *         backface culled, returns VISIBLE otherwise.
 	 */
 	virtual CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
+
+	virtual CullingResult RenderTexturedTriangles(const float *inVtx, const unsigned int *inTris, int nTris, OcclusionTexture *texture, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
 
 	/*!
 	 * \brief Occlusion query for a rectangle with a given depth. The rectangle is given

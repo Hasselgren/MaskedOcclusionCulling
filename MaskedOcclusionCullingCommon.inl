@@ -1695,7 +1695,7 @@ public:
 	 * Rasterizes a list of triangles. Wrapper for the API function, but templated with TEST_Z to allow re-using the same rasterization code both when rasterizing occluders and preforming occlusion tests.
 	 */
 	template<int TEST_Z, int TEXTURE_COORDINATES>
-	FORCE_INLINE CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
+	FORCE_INLINE CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, OcclusionTexture *texture, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
 	{
 		assert(mMaskedHiZBuffer != nullptr);
 
@@ -1823,9 +1823,9 @@ public:
 			// Setup and rasterize a SIMD batch of triangles
 			//////////////////////////////////////////////////////////////////////////////
 #if PRECISE_COVERAGE != 0
-			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(ipVtxX, ipVtxY, pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, nullptr);
+			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(ipVtxX, ipVtxY, pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, texture);
 #else
-			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, nullptr);
+			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, texture);
 #endif
 
 			if (TEST_Z && cullResult == CullingResult::VISIBLE) {
@@ -1844,7 +1844,12 @@ public:
 
 	CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
 	{
-		return (CullingResult)RenderTriangles<0, 0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
+		return (CullingResult)RenderTriangles<0, 0>(inVtx, inTris, nTris, nullptr, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
+	}
+
+	CullingResult RenderTexturedTriangles(const float *inVtx, const unsigned int *inTris, int nTris, OcclusionTexture *texture, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
+	{
+		return (CullingResult)RenderTriangles<0, 1>(inVtx, inTris, nTris, texture, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
 	CullingResult TestTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) const override
@@ -1857,7 +1862,7 @@ public:
 		// Workaround because the RenderTriangles method is reused for both rendering occluders and performing queries, so it's not declared as const.
 		// Still, it's nice for TestTriangles() to be declared as const to indicate it does not modify the HiZ buffer.
 		MaskedOcclusionCullingPrivate *nonConst = (MaskedOcclusionCullingPrivate *)this;
-		return (CullingResult)nonConst->RenderTriangles<1, 0>(inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
+		return (CullingResult)nonConst->RenderTriangles<1, 0>(inVtx, inTris, nTris, nullptr, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
 	}
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

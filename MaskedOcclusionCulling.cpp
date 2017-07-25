@@ -69,41 +69,6 @@ static MaskedOcclusionCulling::Implementation DetectCPUFeatures()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Utility functions (not directly related to the algorithm/rasterizer)
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void MaskedOcclusionCulling::TransformVertices(const float *mtx, const float *inVtx, float *xfVtx, unsigned int nVtx, const VertexLayout &vtxLayout)
-{
-	// This function pretty slow, about 10-20% slower than if the vertices are stored in aligned SOA form.
-	if (nVtx == 0)
-		return;
-
-	// Load matrix and swizzle out the z component. For post-multiplication (OGL), the matrix is assumed to be column
-	// major, with one column per SSE register. For pre-multiplication (DX), the matrix is assumed to be row major.
-	__m128 mtxCol0 = _mm_loadu_ps(mtx);
-	__m128 mtxCol1 = _mm_loadu_ps(mtx + 4);
-	__m128 mtxCol2 = _mm_loadu_ps(mtx + 8);
-	__m128 mtxCol3 = _mm_loadu_ps(mtx + 12);
-
-	int stride = vtxLayout.mStride;
-	const char *vPtr = (const char *)inVtx;
-	float *outPtr = xfVtx;
-
-	// Iterate through all vertices and transform
-	for (unsigned int vtx = 0; vtx < nVtx; ++vtx)
-	{
-		__m128 xVal = _mm_load1_ps((float*)(vPtr));
-		__m128 yVal = _mm_load1_ps((float*)(vPtr + vtxLayout.mOffsetY));
-		__m128 zVal = _mm_load1_ps((float*)(vPtr + vtxLayout.mOffsetZ));
-
-		__m128 xform = _mm_add_ps(_mm_mul_ps(mtxCol0, xVal), _mm_add_ps(_mm_mul_ps(mtxCol1, yVal), _mm_add_ps(_mm_mul_ps(mtxCol2, zVal), mtxCol3)));
-		_mm_storeu_ps(outPtr, xform);
-		vPtr += stride;
-		outPtr += 4;
-	}
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Typedefs
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -474,4 +439,53 @@ void MaskedOcclusionCulling::Destroy(MaskedOcclusionCulling *moc)
 	pfnAlignedFree alignedFreeCallback = moc->mAlignedFreeCallback;
 	moc->~MaskedOcclusionCulling();
 	alignedFreeCallback(moc);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Texture creation functions
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(int width, int height, const unsigned char *data)
+{
+	return CreateTexture(width, height, data, aligned_alloc, aligned_free);
+}
+
+MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(int width, int height, const unsigned char *data, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree)
+{
+	return nullptr;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Transform utility function
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MaskedOcclusionCulling::TransformVertices(const float *mtx, const float *inVtx, float *xfVtx, unsigned int nVtx, const VertexLayout &vtxLayout)
+{
+	// This function pretty slow, about 10-20% slower than if the vertices are stored in aligned SOA form.
+	if (nVtx == 0)
+		return;
+
+	// Load matrix and swizzle out the z component. For post-multiplication (OGL), the matrix is assumed to be column
+	// major, with one column per SSE register. For pre-multiplication (DX), the matrix is assumed to be row major.
+	__m128 mtxCol0 = _mm_loadu_ps(mtx);
+	__m128 mtxCol1 = _mm_loadu_ps(mtx + 4);
+	__m128 mtxCol2 = _mm_loadu_ps(mtx + 8);
+	__m128 mtxCol3 = _mm_loadu_ps(mtx + 12);
+
+	int stride = vtxLayout.mStride;
+	const char *vPtr = (const char *)inVtx;
+	float *outPtr = xfVtx;
+
+	// Iterate through all vertices and transform
+	for (unsigned int vtx = 0; vtx < nVtx; ++vtx)
+	{
+		__m128 xVal = _mm_load1_ps((float*)(vPtr));
+		__m128 yVal = _mm_load1_ps((float*)(vPtr + vtxLayout.mOffsetY));
+		__m128 zVal = _mm_load1_ps((float*)(vPtr + vtxLayout.mOffsetZ));
+
+		__m128 xform = _mm_add_ps(_mm_mul_ps(mtxCol0, xVal), _mm_add_ps(_mm_mul_ps(mtxCol1, yVal), _mm_add_ps(_mm_mul_ps(mtxCol2, zVal), mtxCol3)));
+		_mm_storeu_ps(outPtr, xform);
+		vPtr += stride;
+		outPtr += 4;
+	}
 }
