@@ -18,6 +18,7 @@
 #include <float.h>
 #include <math.h>
 #include "MaskedOcclusionCulling.h"
+#include "MaskedOcclusionTextureInternal.h"
 #include "CompilerSpecific.inl"
 
 #if defined(__MICROSOFT_COMPILER) && _MSC_VER < 1900
@@ -173,7 +174,9 @@ typedef MaskedOcclusionCulling::VertexLayout VertexLayout;
 
 namespace MaskedOcclusionCullingAVX2
 {
-	FORCE_INLINE void GatherVertices(__m256 *vtxX, __m256 *vtxY, __m256 *vtxW, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
+
+	template<int TEXTURE_COORDINATES>
+	FORCE_INLINE void GatherVertices(__m256 *vtxX, __m256 *vtxY, __m256 *vtxW, __m256 *vtxU, __m256 *vtxV, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
 	{
 		assert(numLanes >= 1);
 
@@ -207,6 +210,11 @@ namespace MaskedOcclusionCullingAVX2
 			vtxX[i] = _mm256_i32gather_ps((float *)vPtr, vtxIdx[i], 1);
 			vtxY[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetY), vtxIdx[i], 1);
 			vtxW[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetW), vtxIdx[i], 1);
+			if (TEXTURE_COORDINATES)
+			{
+				vtxU[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetU), vtxIdx[i], 1);
+				vtxV[i] = _mm256_i32gather_ps((float *)(vPtr + vtxLayout.mOffsetV), vtxIdx[i], 1);
+			}
 		}
 	}
 

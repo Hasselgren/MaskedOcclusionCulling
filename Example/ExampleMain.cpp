@@ -119,7 +119,7 @@ int main(int argc, char* argv[])
 	unsigned int triIndices[] = { 0, 1, 2 };
 
 	// Render the triangle
-	moc->RenderTriangles((float*)triVerts, triIndices, 1);
+	//moc->RenderTriangles((float*)triVerts, triIndices, 1);
 
 	// A clockwise winded (backfacing) triangle
 	ClipspaceVertex cwTriVerts[] = { { 7, -7, 0, 20 },{ 7.5, -7, 0, 20 },{ 7, -7.5, 0, 20 } };
@@ -149,6 +149,27 @@ int main(int argc, char* argv[])
 	// Render triangle with SoA layout
 	moc->RenderTriangles((float*)SoAVerts, triIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, SoAVertexLayout);
 
+	////////////////////////////////////////////////////////////////////////////////////////
+	// Render textured occluder
+	////////////////////////////////////////////////////////////////////////////////////////
+
+	// A triangle that intersects the view frustum
+	float ttriVerts[] = { 
+		5, 0, 0, 10, 0, 0, 
+		30, 0, 0, 20, 1, 0, 
+		10, 50, 0, 40, 0, 1 };
+	unsigned int ttriIndices[] = { 0, 1, 2 };
+
+	MaskedOcclusionTexture *texture = MaskedOcclusionTexture::Create(256, 256);
+	unsigned char *imgData = new unsigned char[256 * 256];
+	memset(imgData, 0xff, 256 * 256);
+	texture->SetMipLevel(0, imgData, 0.5f);
+	texture->GenerateMipmaps();
+	texture->Finalize();
+
+	MaskedOcclusionCulling::VertexLayout texLayout(6*sizeof(float), 4, 12, 16, 20);
+
+	moc->RenderTexturedTriangles((float*)ttriVerts, ttriIndices, 1, texture, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
 
 	////////////////////////////////////////////////////////////////////////////////////////
 	// Perform some occlusion queries

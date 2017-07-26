@@ -100,6 +100,46 @@
 #endif
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Masked occlusion culling texture class
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+struct MaskedOcclusionTexture
+{
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Memory management callback functions
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	typedef void *(*pfnAlignedAlloc)(size_t alignment, size_t size);
+	typedef void(*pfnAlignedFree) (void *ptr);
+
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Functions
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	/*!
+	 */
+	static MaskedOcclusionTexture *Create(unsigned int width, unsigned int height);
+
+	/*!
+	 */
+	static MaskedOcclusionTexture *Create(unsigned int width, unsigned int height, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree);
+
+	virtual void SetMipLevel(unsigned int mipLevel, const unsigned char *data, float alphaThreshold) = 0;
+
+	virtual void GenerateMipmaps() = 0;
+
+	virtual void Finalize() = 0;
+
+protected:
+	
+	pfnAlignedAlloc mAlignedAllocCallback;
+	pfnAlignedFree  mAlignedFreeCallback;
+
+	virtual ~MaskedOcclusionTexture() {}
+};
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Masked occlusion culling class
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -166,7 +206,7 @@ public:
 	{
 		VertexLayout() = default;
 		VertexLayout(int stride, int offsetY, int offsetZW, int offsetU = 0, int offsetV = 0) :
-			mStride(stride), mOffsetY(offsetY), mOffsetW(offsetZW) {}
+			mStride(stride), mOffsetY(offsetY), mOffsetW(offsetZW), mOffsetU(offsetU), mOffsetV(offsetV) {}
 
 		int mStride;      //!< byte stride between vertices
 		int mOffsetY;     //!< byte offset from X to Y coordinate
@@ -231,23 +271,6 @@ public:
 		} mOccludees;
 	};
 
-	struct OcclusionTexture
-	{
-		pfnAlignedAlloc mAlignedAllocCallback;
-		pfnAlignedFree  mAlignedFreeCallback;
-
-		unsigned int    mWidth;                  //!< Width of image (in texels)
-		unsigned int    mHeight;                 //!< Height of image (in texels)
-		unsigned int    mMipLevels;              //!< Total number of mip levels
-		unsigned int    mMiplevelOffset[16];     //!< Data offset to certain mip level
-		unsigned char   *mOcclusionData;         //!< Raw data pointer. Data is one byte per texel, TODO: pack to 1 bit per texel?
-
-		OcclusionTexture() = delete;           // Must create texture objects using MaskedOcclusionCulling::CreateTexture()
-	
-		void GenerateAllMipmaps(const unsigned char *data, float alphaThreshold);
-		void SetMipLevel(unsigned int mipLevel, const unsigned char *data, float alphaThreshold);
-	};
-
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Functions
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -269,14 +292,6 @@ public:
 	 * use the delete operator, and should rather use this function to free up memory.
 	 */
 	static void Destroy(MaskedOcclusionCulling *moc);
-
-	/*!
-	 */
-	static OcclusionTexture *CreateTexture(unsigned int width, unsigned int height);
-
-	/*!
-	 */
-	static OcclusionTexture *CreateTexture(unsigned int width, unsigned int height, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree);
 
 	/*!
 	 * \brief Sets the resolution of the hierarchical depth buffer. This function will
@@ -360,7 +375,7 @@ public:
 	 */
 	virtual CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
 
-	virtual CullingResult RenderTexturedTriangles(const float *inVtx, const unsigned int *inTris, int nTris, OcclusionTexture *texture, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
+	virtual CullingResult RenderTexturedTriangles(const float *inVtx, const unsigned int *inTris, int nTris, MaskedOcclusionTexture *texture, const float *modelToClipMatrix = nullptr, BackfaceWinding bfWinding = BACKFACE_CW, ClipPlanes clipPlaneMask = CLIP_PLANE_ALL, const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
 
 	/*!
 	 * \brief Occlusion query for a rectangle with a given depth. The rectangle is given

@@ -19,6 +19,7 @@
 #include <float.h>
 #include <math.h>
 #include "MaskedOcclusionCulling.h"
+#include "MaskedOcclusionTextureInternal.h"
 #include "CompilerSpecific.inl"
 
 #if defined(__AVX__) || defined(__AVX2__)
@@ -185,7 +186,8 @@ MAKE_ACCESSOR(simd_i32, __m128i, int, const, 4)
 // Specialized SSE input assembly function for general vertex gather
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FORCE_INLINE void GatherVertices(__m128 *vtxX, __m128 *vtxY, __m128 *vtxW, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
+template<int TEXTURE_COORDINATES>
+FORCE_INLINE void GatherVertices(__m128 *vtxX, __m128 *vtxY, __m128 *vtxW, __m128 *vtxU, __m128 *vtxV, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
 {
 	for (int lane = 0; lane < numLanes; lane++)
 	{
@@ -198,6 +200,13 @@ FORCE_INLINE void GatherVertices(__m128 *vtxX, __m128 *vtxY, __m128 *vtxW, const
 			simd_f32(vtxX[i])[lane] = *((float*)vPtrX);
 			simd_f32(vtxY[i])[lane] = *((float*)vPtrY);
 			simd_f32(vtxW[i])[lane] = *((float*)vPtrW);
+			if (TEXTURE_COORDINATES)
+			{
+				char *vPtrU = vPtrX + vtxLayout.mOffsetU;
+				char *vPtrV = vPtrX + vtxLayout.mOffsetV;
+				simd_f32(vtxU[i])[lane] = *((float*)vPtrU);
+				simd_f32(vtxV[i])[lane] = *((float*)vPtrV);
+			}
 		}
 	}
 }
@@ -439,103 +448,6 @@ void MaskedOcclusionCulling::Destroy(MaskedOcclusionCulling *moc)
 	pfnAlignedFree alignedFreeCallback = moc->mAlignedFreeCallback;
 	moc->~MaskedOcclusionCulling();
 	alignedFreeCallback(moc);
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Texture creation functions
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(unsigned int width, unsigned int height)
-{
-	return CreateTexture(width, height, aligned_alloc, aligned_free);
-}
-
-MaskedOcclusionCulling::OcclusionTexture *MaskedOcclusionCulling::CreateTexture(unsigned int width, unsigned int height, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree)
-{
-	assert(width > 0 && height > 0);
-
-	// Allocate texture object
-	OcclusionTexture *texture = (OcclusionTexture *)alignedAlloc(64, sizeof(OcclusionTexture));
-	if (texture == nullptr)
-		return texture;
-
-	texture->mAlignedAllocCallback = alignedAlloc;
-	texture->mAlignedFreeCallback = alignedFree;
-	texture->mWidth = width;
-	texture->mHeight = height;
-	texture->mMipLevels = 1 + (int)floor(log2f(max((float)width, (float)height)));
-
-	// Compute mip level offsets & size of entire mip chain
-	int totalSize = 0, mipWidth = width, mipHeight = height;
-	for (unsigned int mip = 0; mip < texture->mMipLevels; ++mip)
-	{
-		texture->mMiplevelOffset[mip] = totalSize;
-		totalSize += mipWidth*mipHeight;
-		mipWidth = max(1, mipWidth / 2);
-		mipHeight = max(1, mipHeight / 2);
-	}
-	
-	// Allocate memory for entire mip chain
-	texture->mData = (unsigned char *)alignedAlloc(64, sizeof(unsigned char)*totalSize);
-	if (texture->mData == nullptr) 
-	{
-		alignedFree(texture);
-		return nullptr;
-	}
-
-	return texture;
-}
-
-void OcclusionTexture_FilterCorrection(int width, int height, unsigned char *data, pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree)
-{
-	unsigned char *tmpData = (unsigned char*)alignedAlloc(64, sizeof(unsigned char)*width*height);
-	memcpy(tmpData, data, sizeof(unsigned char)*width*height);
-
-	for (int y = 0; y < height; ++y)
-	{
-		for (int x = 0; x < width; ++x)
-		{
-			// Search a n8 filter to make things robust to bilinear filtering
-			int occluded = 0;
-			for (int dy = -1; dy < 1; ++dy)
-			{
-				for (int dx = -1; dx < 1; ++dx)
-				{
-					int tx = x + dx;
-					int ty = y + dy;
-					tx = tx < 0 ? (width + tx) : (tx >= width ? tx - width : tx);
-					ty = ty < 0 ? (height + ty) : (ty >= height ? ty - height : ty);
-					occluded |= tmpData[tx + ty*width];
-				}
-			}
-			data[x + y*width] = occluded;
-		}
-	}
-
-	alignedFree(tmpData);
-}
-
-void MaskedOcclusionCulling::OcclusionTexture::GenerateAllMipmaps(const unsigned char *data, float alphaThreshold)
-{
-	// Compute occlusion for miplevel 0
-	for (unsigned int y = 0; y < mHeight; ++y)
-		for (unsigned int x = 0; x < mWidth; ++x)
-			mOcclusionData[x + y*mWidth + mMiplevelOffset[0]] = ((float)data[x + y*mWidth] / 255.0f) > alphaThreshold ? 1 : 0;
-
-	// 
-
-}
-
-void MaskedOcclusionCulling::OcclusionTexture::SetMipLevel(unsigned int mipLevel, const unsigned char *data, float alphaThreshold)
-{
-	unsigned int mipWidth = max(1u, mWidth >> mipLevel);
-	unsigned int mipHeight = max(1u, mHeight >> mipLevel);
-
-	for (unsigned int y = 0; y < mipHeight; ++y)
-		for (unsigned int x = 0; x < mipWidth; ++x)
-			mOcclusionData[x + y*mipWidth + mMiplevelOffset[mipLevel]] = ((float)data[x + y*mipWidth] / 255.0f) > alphaThreshold ? 1 : 0;
-
-	OcclusionTexture_FilterCorrection((int)mipWidth, (int)mipHeight, &mOcclusionData[mMiplevelOffset[mipLevel]], mAlignedAllocCallback, mAlignedFreeCallback);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

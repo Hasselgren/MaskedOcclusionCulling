@@ -18,6 +18,7 @@
 #include <float.h>
 #include <math.h>
 #include "MaskedOcclusionCulling.h"
+#include "MaskedOcclusionTextureInternal.h"
 #include "CompilerSpecific.inl"
 
 // Make sure compiler supports AVX-512 intrinsics: Visual Studio 2017 (Update 3) || Intel C++ Compiler 16.0 || Clang 4.0 || GCC 5.0

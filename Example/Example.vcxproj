@@ -99,6 +99,7 @@
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
     </ClCompile>
+    <ClCompile Include="..\MaskedOcclusionTexture.cpp" />
     <ClCompile Include="ExampleMain.cpp">
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotSet</EnableEnhancedInstructionSet>
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotSet</EnableEnhancedInstructionSet>
@@ -107,6 +108,7 @@
   <ItemGroup>
     <ClInclude Include="..\CullingThreadpool.h" />
     <ClInclude Include="..\MaskedOcclusionCulling.h" />
+    <ClInclude Include="..\MaskedOcclusionTextureInternal.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\CompilerSpecific.inl" />
