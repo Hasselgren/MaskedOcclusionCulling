@@ -55,10 +55,8 @@
 #define SIMD_LANE_YCOORD_I _mm256_setr_epi32(128, 384, 640, 896, 1152, 1408, 1664, 1920)
 #define SIMD_LANE_YCOORD_F _mm256_setr_ps(128.0f, 384.0f, 640.0f, 896.0f, 1152.0f, 1408.0f, 1664.0f, 1920.0f)
 
-#define SIMD_PIXEL_WIDTH      4
-#define SIMD_PIXEL_HEIGHT     2
-#define SIMD_PIXEL_COL_OFFSET_F _mm256_setr_ps(0, 1, 0, 1, 2, 3, 2, 3)
-#define SIMD_PIXEL_ROW_OFFSET_F _mm256_setr_ps(0, 0, 1, 1, 0, 0, 1, 1)
+#define SIMD_PIXEL_COL_OFFSET_F _mm256_setr_ps(0, 1, 2, 3, 0, 1, 2, 3)
+#define SIMD_PIXEL_ROW_OFFSET_F _mm256_setr_ps(0, 0, 0, 0, 1, 1, 1, 1)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // AVX specific typedefs and functions
@@ -166,14 +164,14 @@ MAKE_ACCESSOR(simd_f32, __m256, float, const, 8)
 MAKE_ACCESSOR(simd_i32, __m256i, int, , 8)
 MAKE_ACCESSOR(simd_i32, __m256i, int, const, 8)
 
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Specialized AVX input assembly function for general vertex gather
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
 typedef MaskedOcclusionCulling::VertexLayout VertexLayout;
 
 namespace MaskedOcclusionCullingAVX2
 {
+
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Specialized AVX helper function for masked occlusion culling class
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	template<int TEXTURE_COORDINATES>
 	FORCE_INLINE void GatherVertices(__m256 *vtxX, __m256 *vtxY, __m256 *vtxW, __m256 *vtxU, __m256 *vtxV, const float *inVtx, const unsigned int *inTrisPtr, int numLanes, const VertexLayout &vtxLayout)
@@ -217,6 +215,9 @@ namespace MaskedOcclusionCullingAVX2
 			}
 		}
 	}
+
+	FORCE_INLINE unsigned int Coverage2Lanes(unsigned int mask) { return (mask & 0xF) | ((mask >> 4) & 0xF0); }
+	FORCE_INLINE unsigned int Lanes2Coverage(unsigned int mask) { return (mask & 0xF) | ((mask & 0xF0) << 4); }
 
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::AVX2;
 

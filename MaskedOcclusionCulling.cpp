@@ -94,8 +94,8 @@ typedef MaskedOcclusionCulling::VertexLayout    VertexLayout;
 #define SIMD_LANE_YCOORD_I _mm_setr_epi32(128, 384, 640, 896)
 #define SIMD_LANE_YCOORD_F _mm_setr_ps(128.0f, 384.0f, 640.0f, 896.0f)
 
-#define SIMD_PIXEL_WIDTH      2
-#define SIMD_PIXEL_HEIGHT     2
+#define SIMD_LOW_HALF_MASK 0x3
+#define SIMD_HIGH_HALF_MASK 0xC
 #define SIMD_PIXEL_COL_OFFSET_F _mm_setr_ps(0, 1, 0, 1)
 #define SIMD_PIXEL_ROW_OFFSET_F _mm_setr_ps(0, 0, 1, 1)
 
@@ -183,7 +183,7 @@ MAKE_ACCESSOR(simd_i32, __m128i, int, , 4)
 MAKE_ACCESSOR(simd_i32, __m128i, int, const, 4)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Specialized SSE input assembly function for general vertex gather
+// Specialized SSE helper function for masked occlusion culling class
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<int TEXTURE_COORDINATES>
@@ -210,6 +210,9 @@ FORCE_INLINE void GatherVertices(__m128 *vtxX, __m128 *vtxY, __m128 *vtxW, __m12
 		}
 	}
 }
+
+FORCE_INLINE unsigned int Coverage2Lanes(unsigned int mask) { return (mask & 0x03) | ((mask >> 6) & 0xC); }
+FORCE_INLINE unsigned int Lanes2Coverage(unsigned int mask) { return (mask & 0x03) | ((mask << 6) & 0xC); }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // SSE4.1 version

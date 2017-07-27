@@ -19,8 +19,6 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define SIMD_ALL_LANES_MASK    ((1 << SIMD_LANES) - 1)
-#define SIMD_LOW_HALF_MASK     ((1 << (SIMD_LANES/2)) - 1)
-#define SIMD_HIGH_HALF_MASK    (SIMD_ALL_LANES_MASK & ~SIMD_LOW_HALF_MASK)
 
 // Tile dimensions are 32xN pixels. These values are not tweakable and the code must also be modified
 // to support different tile sizes as it is tightly coupled with the SSE/AVX register size
@@ -131,6 +129,18 @@ public:
 		{
 			return _mmw_fmadd_ps(_mmw_set1_ps(mDy), pixelY, _mmw_fmadd_ps(_mmw_set1_ps(mDx), pixelX, _mmw_set1_ps(mVal0)));
 		}
+	};
+
+	struct TextureInterpolants
+	{
+		// Interpolants for (u/z, v/z) and (1/z)
+		Interpolant zInterpolant;
+		Interpolant uInterpolant;
+		Interpolant vInterpolant;
+
+		// Constants for perspective corrected derivatives
+		float uDerivConsts[3];
+		float vDerivConsts[3];
 	};
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -804,21 +814,20 @@ public:
 		__mw *zMin = mMaskedHiZBuffer[tileIdx].mZMin;
 
 		// Swizzle coverage mask to 8x4 subtiles and test if any subtiles are not covered at all
-		__mwi rastMask = _mmw_transpose_epi8(coverage);
-		__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
+		__mwi deadLane = _mmw_cmpeq_epi32(coverage, SIMD_BITS_ZERO);
 
 		// Mask out all subtiles failing the depth test (don't update these subtiles)
 		deadLane = _mmw_or_epi32(deadLane, _mmw_srai_epi32(simd_cast<__mwi>(_mmw_sub_ps(zTriv, zMin[0])), 31));
-		rastMask = _mmw_andnot_epi32(deadLane, rastMask);
+		__mwi maskedCoverage = _mmw_andnot_epi32(deadLane, coverage);
 
 		// Use distance heuristic to discard layer 1 if incoming triangle is significantly nearer to observer
 		// than the buffer contents. See Section 3.2 in "Masked Software Occlusion Culling"
-		__mwi coveredLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ONE);
+		__mwi coveredLane = _mmw_cmpeq_epi32(maskedCoverage, SIMD_BITS_ONE);
 		__mw diff = _mmw_fmsub_ps(zMin[1], _mmw_set1_ps(2.0f), _mmw_add_ps(zTriv, zMin[0]));
 		__mwi discardLayerMask = _mmw_andnot_epi32(deadLane, _mmw_or_epi32(_mmw_srai_epi32(simd_cast<__mwi>(diff), 31), coveredLane));
 
 		// Update the mask with incoming triangle coverage
-		mask = _mmw_or_epi32(_mmw_andnot_epi32(discardLayerMask, mask), rastMask);
+		mask = _mmw_or_epi32(_mmw_andnot_epi32(discardLayerMask, mask), maskedCoverage);
 
 		__mwi maskFull = _mmw_cmpeq_epi32(mask, SIMD_BITS_ONE);
 
@@ -844,15 +853,12 @@ public:
 		__mw *zMin = mMaskedHiZBuffer[tileIdx].mZMin;
 		__mwi &mask = mMaskedHiZBuffer[tileIdx].mMask;
 
-		// Swizzle coverage mask to 8x4 subtiles
-		__mwi rastMask = _mmw_transpose_epi8(coverage);
-
 		// Perform individual depth tests with layer 0 & 1 and mask out all failing pixels
 		__mw sdist0 = _mmw_sub_ps(zMin[0], zTriv);
 		__mw sdist1 = _mmw_sub_ps(zMin[1], zTriv);
 		__mwi sign0 = _mmw_srai_epi32(simd_cast<__mwi>(sdist0), 31);
 		__mwi sign1 = _mmw_srai_epi32(simd_cast<__mwi>(sdist1), 31);
-		__mwi triMask = _mmw_and_epi32(rastMask, _mmw_or_epi32(_mmw_andnot_epi32(mask, sign0), _mmw_and_epi32(mask, sign1)));
+		__mwi triMask = _mmw_and_epi32(coverage, _mmw_or_epi32(_mmw_andnot_epi32(mask, sign0), _mmw_and_epi32(mask, sign1)));
 
 		// Early out if no pixels survived the depth test (this test is more accurate than
 		// the early culling test in TraverseScanline())
@@ -914,16 +920,17 @@ public:
 	/*
 	 *
 	 */
-	FORCE_INLINE __mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t, Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant, const MaskedOcclusionTextureInternal *texture)
+	__mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t, TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
 	{
 		// Do z-cull. The texture lookup is expensive, so we want to remove as much work as possible
 		coverageMask = _mmw_andnot_epi32(_mmw_srai_epi32(simd_cast<__mwi>(zDist0t), 31), coverageMask);
 		unsigned int subtilesMask = _mmw_movemask_ps(_mmw_not_ps(simd_cast<__mw>(_mmw_cmpeq_epi32(coverageMask, _mmw_set1_epi32(0)))));
 
-		// JON TODO: Slow & not needed
-		float tilePixelX = (float)((tileIdx % mTilesWidth)*TILE_WIDTH) + 0.5f;
-		float tilePixelY = (float)((tileIdx / mTilesWidth)*TILE_HEIGHT) + 0.5f;
+		// TODO: Slow & not needed
+		float tilePixelX = (float)((tileIdx % mTilesWidth)*TILE_WIDTH);
+		float tilePixelY = (float)((tileIdx / mTilesWidth)*TILE_HEIGHT);
 
+		// TODO: Not future proof, assumes AVX-512
 		static const float subtileOffsetX[16] = { 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f };
 		static const float subtileOffsetY[16] = { 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 4.0f, 4.0f, 4.0f, 8.0f, 8.0f, 8.0f, 8.0f, 12.0f, 12.0f, 12.0f, 12.0f };
 
@@ -937,17 +944,15 @@ public:
 			unsigned int textureCoverageMask = 0;
 			unsigned int subtileCoverageMask = (unsigned int)simd_i32(coverageMask)[subtileIdx];
 
-			for (int py = 0; py < 4; py += SIMD_PIXEL_HEIGHT)
+			for (int py = 0; py < 4; py += 2) // TODO: Must be N x 2 tiles because of mask computation, use analytic derivatives instead?
 			{
-				for (int px = 0; px < 8; px += SIMD_PIXEL_WIDTH)
+				for (int px = 0; px < 8; px += (SIMD_LANES / 2))
 				{
 					///////////////////////////////////////////////////////////////////////////////
 					// Early exit if mask is already zero
 					///////////////////////////////////////////////////////////////////////////////
 
-					unsigned int bitIdx0 = (px / 8) + (py * 8);
-					unsigned int bitIdx1 = (px / 8) + (py * 8) + 4;
-					unsigned int mask = ((subtileCoverageMask >> bitIdx0) & SIMD_LOW_HALF_MASK) | ((subtileCoverageMask >> bitIdx1) & SIMD_HIGH_HALF_MASK);
+					unsigned int mask = Coverage2Lanes(subtileCoverageMask >> (px + py*8));
 					if (!mask)
 						continue;
 
@@ -957,30 +962,36 @@ public:
 
 					// Compute pixel coordinates
 					__mw pixelX = _mmw_add_ps(_mmw_set1_ps(subtilePixelX + px), SIMD_PIXEL_COL_OFFSET_F);
-					__mw pixelY = _mmw_add_ps(_mmw_set1_ps(subtilePixelY + py), SIMD_PIXEL_COL_OFFSET_F);
+					__mw pixelY = _mmw_add_ps(_mmw_set1_ps(subtilePixelY + py), SIMD_PIXEL_ROW_OFFSET_F);
 
 					// Interpolate (u,v) for texture lookup = (u/z, v/z) / (1/z)
-					__mw rcpZ = _mmw_rcp_ps(zInterpolant.interpolate(pixelX, pixelY));
-					__mw u = _mmw_mul_ps(rcpZ, uInterpolant.interpolate(pixelX, pixelY));
-					__mw v = _mmw_mul_ps(rcpZ, vInterpolant.interpolate(pixelX, pixelY));
+					__mw rcpZ = _mmw_rcp_ps(texInterpolants.zInterpolant.interpolate(pixelX, pixelY));
+					__mw u = _mmw_mul_ps(rcpZ, texInterpolants.uInterpolant.interpolate(pixelX, pixelY));
+					__mw v = _mmw_mul_ps(rcpZ, texInterpolants.vInterpolant.interpolate(pixelX, pixelY));
 
 					///////////////////////////////////////////////////////////////////////////////
 					// Mip level computation
 					///////////////////////////////////////////////////////////////////////////////
 
-					// Compute derivatives using finite differences
-					__mw dudx = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(u, u, _MM_SHUFFLE(2, 3, 0, 1)), u));
-					__mw dvdx = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(v, v, _MM_SHUFFLE(2, 3, 0, 1)), v));
-					__mw dudy = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(u, u, _MM_SHUFFLE(1, 0, 3, 2)), u));
-					__mw dvdy = _mmw_abs_ps(_mmw_sub_ps(_mmw_shuffle_ps(v, v, _MM_SHUFFLE(1, 0, 3, 2)), v));
+					// Compute derivatives using arithmetic approach (allows processing individual pixels if desired)
+					__mw rcpZSqr = _mmw_mul_ps(rcpZ, rcpZ);
+					__mw dudx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, _mmw_set1_ps(texInterpolants.uDerivConsts[0]), _mmw_set1_ps(texInterpolants.uDerivConsts[1]))));
+					__mw dvdx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, _mmw_set1_ps(texInterpolants.vDerivConsts[0]), _mmw_set1_ps(texInterpolants.vDerivConsts[1]))));
+					__mw dudy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, _mmw_set1_ps(texInterpolants.uDerivConsts[0]), _mmw_set1_ps(texInterpolants.uDerivConsts[2])))); // Actually computes negative derivative, but it's canceled by the abs
+					__mw dvdy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, _mmw_set1_ps(texInterpolants.vDerivConsts[0]), _mmw_set1_ps(texInterpolants.vDerivConsts[2])))); // Actually computes negative derivative, but it's canceled by the abs
 
-					// Compute max length of derivative
-					__mw maxLen = _mmw_add_ps(_mmw_max_ps(dudx, dudy), _mmw_max_ps(dvdx, dvdy)); // TODO: This is the upper bound for the lod computation according to OpenGL 4.4 spec
+					// Compute max length of derivative. This is the upper bound for the lod computation according to OpenGL 4.4 spec
+					__mw maxLen = _mmw_add_ps(_mmw_max_ps(dudx, dudy), _mmw_max_ps(dvdx, dvdy));
 
 					// Compute mip level, the log2 is computed by getting the fp32 exponent
-					__mwi exponentIEEE = _mmw_sub_epi32(_mmw_srli_epi32(simd_cast<__mwi>(maxLen), 23), _mmw_set1_epi32(127));
-					__mwi mipLevel = _mmw_sub_epi32(_mmw_set1_epi32(texture->mMipLevels - 1), exponentIEEE);
+					__mwi exponentIEEE = _mmw_sub_epi32(_mmw_srli_epi32(simd_cast<__mwi>(maxLen), 23), _mmw_set1_epi32(126));
+					__mwi mipLevel = _mmw_add_epi32(_mmw_set1_epi32(texture->mMipLevels - 1), exponentIEEE);
 					mipLevel = _mmw_max_epi32(_mmw_setzero_epi32(), _mmw_min_epi32(_mmw_set1_epi32(texture->mMipLevels - 1), mipLevel));
+
+					__mw idudx = _mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), dudx);
+					__mw idvdx = _mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), dvdx);
+					__mw idudy = _mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), dudy);
+					__mw idvdy = _mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), dvdx);
 
 					///////////////////////////////////////////////////////////////////////////////
 					// Texture address calculation
@@ -1014,7 +1025,7 @@ public:
 					// Swizzle texture mask & accumulate result
 					///////////////////////////////////////////////////////////////////////////////
 					
-					textureCoverageMask |= ((textureMask & SIMD_LOW_HALF_MASK) << bitIdx0) | ((textureMask & SIMD_HIGH_HALF_MASK) << bitIdx1);
+					textureCoverageMask |= Lanes2Coverage(textureMask) << (px + py*8);
 				}
 			}
 
@@ -1035,7 +1046,7 @@ public:
 	FORCE_INLINE int TraverseScanline(int leftOffset, int rightOffset, int tileIdx, 
 		int rightEvent, int leftEvent, const __mwi *events, 
 		const __mw &zTriMin, const __mw &zTriMax, const __mw &iz0, float zx,
-		Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant, const MaskedOcclusionTextureInternal *texture)
+		TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
 	{
 		// Floor edge events to integer pixel coordinates (shift out fixed point bits)
 		int eventOffset = leftOffset << TILE_WIDTH_SHIFT;
@@ -1076,9 +1087,12 @@ public:
 				for (int i = 0; i < NRIGHT; ++i)
 					accumulatedMask = _mmw_andnot_epi32(_mmw_sllv_ones(right[i]), accumulatedMask);
 
+				// Swizzle rasterization mask to 8x4 subtiles
+				__mwi rastMask8x4 = _mmw_transpose_epi8(accumulatedMask);
+
 				// Perform conservative texture lookup for alpha tested triangles
 				if (TEXTURE_COORDINATES)
-					accumulatedMask = _mmw_and_epi32(accumulatedMask, TextureLookup(tileIdx, accumulatedMask, dist0, zInterpolant, uInterpolant, vInterpolant, texture));
+					rastMask8x4 = TextureLookup(tileIdx, rastMask8x4, dist0, texInterpolants, texture);
 
 				if (TEST_Z)
 				{
@@ -1086,8 +1100,7 @@ public:
 					__mw zSubTileMax = _mmw_min_ps(z0, zTriMax);
 					__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zSubTileMax, zMinBuf));
 
-					__mwi rastMask = _mmw_transpose_epi8(accumulatedMask);
-					__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
+					__mwi deadLane = _mmw_cmpeq_epi32(rastMask8x4, SIMD_BITS_ZERO);
 					zPass = _mmw_andnot_epi32(deadLane, zPass);
 #if QUERY_DEBUG_BUFFER != 0
 					__mwi debugVal = _mmw_blendv_epi32(_mmw_set1_epi32(0), _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(2), zPass), _mmw_not_epi32(deadLane));
@@ -1102,9 +1115,9 @@ public:
 					// Compute interpolated min for each 8x4 subtile and update the masked hierarchical z buffer entry
 					__mw zSubTileMin = _mmw_max_ps(z0, zTriMin);
 #if QUICK_MASK != 0
-					UpdateTileQuick(tileIdx, accumulatedMask, zSubTileMin);
+					UpdateTileQuick(tileIdx, rastMask8x4, zSubTileMin);
 #else
-					UpdateTileAccurate(tileIdx, accumulatedMask, zSubTileMin);
+					UpdateTileAccurate(tileIdx, rastMask8x4, zSubTileMin);
 #endif
 				}
 			}
@@ -1136,12 +1149,12 @@ public:
 		const __mwi *eventStart, const __mw *slope, const __mwi *slopeTileDelta,
 		const __mwi *edgeY, const __mwi *absEdgeX, const __mwi *slopeSign, const __mwi *eventStartRemainder, const __mwi *slopeTileRemainder,
 		const __mw &zTriMin, const __mw &zTriMax, __mw &z0, float zx, float zy,
-		Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant, const MaskedOcclusionTextureInternal *texture)
+		TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
 #else
 	FORCE_INLINE int RasterizeTriangle(unsigned int triIdx, int bbWidth, int tileRowIdx, int tileMidRowIdx, int tileEndRowIdx, 
 		const __mwi *eventStart, const __mwi *slope, const __mwi *slopeTileDelta,
 		const __mw &zTriMin, const __mw &zTriMax, __mw &z0, float zx, float zy,
-		Interpolant &zInterpolant, Interpolant &uInterpolant, Interpolant &vInterpolant, const MaskedOcclusionTextureInternal *texture)
+		TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
 #endif
 	{
 		if (TEST_Z)
@@ -1234,7 +1247,7 @@ public:
 				}
 
 				// Traverse the scanline and update the masked hierarchical z buffer
-				cullResult = TraverseScanline<TEST_Z, 1, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, 0, 2, triEvent, zTriMin, zTriMax, z0, zx, zInterpolant, uInterpolant, vInterpolant, texture);
+				cullResult = TraverseScanline<TEST_Z, 1, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, 0, 2, triEvent, zTriMin, zTriMax, z0, zx, texInterpolants, texture);
 
 				if (TEST_Z && cullResult == CullingResult::VISIBLE) // Early out if performing occlusion query
 					return CullingResult::VISIBLE;
@@ -1267,9 +1280,9 @@ public:
 
 				// Traverse the scanline and update the masked hierarchical z buffer.
 				if (MID_VTX_RIGHT)
-					cullResult = TraverseScanline<TEST_Z, 2, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, 0, 2, triEvent, zTriMin, zTriMax, z0, zx, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult = TraverseScanline<TEST_Z, 2, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, 0, 2, triEvent, zTriMin, zTriMax, z0, zx, texInterpolants, texture);
 				else
-					cullResult = TraverseScanline<TEST_Z, 1, 2, TEXTURE_COORDINATES>(start, end, tileRowIdx, 0, 2, triEvent, zTriMin, zTriMax, z0, zx, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult = TraverseScanline<TEST_Z, 1, 2, TEXTURE_COORDINATES>(start, end, tileRowIdx, 0, 2, triEvent, zTriMin, zTriMax, z0, zx, texInterpolants, texture);
 
 				if (TEST_Z && cullResult == CullingResult::VISIBLE) // Early out if performing occlusion query
 					return CullingResult::VISIBLE;
@@ -1299,7 +1312,7 @@ public:
 					}
 
 					// Traverse the scanline and update the masked hierarchical z buffer
-					cullResult = TraverseScanline<TEST_Z, 1, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, MID_VTX_RIGHT + 0, MID_VTX_RIGHT + 1, triEvent, zTriMin, zTriMax, z0, zx, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult = TraverseScanline<TEST_Z, 1, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, MID_VTX_RIGHT + 0, MID_VTX_RIGHT + 1, triEvent, zTriMin, zTriMax, z0, zx, texInterpolants, texture);
 
 					if (TEST_Z && cullResult == CullingResult::VISIBLE) // Early out if performing occlusion query
 						return CullingResult::VISIBLE;
@@ -1343,7 +1356,7 @@ public:
 					}
 
 					// Traverse the scanline and update the masked hierarchical z buffer
-					cullResult = TraverseScanline<TEST_Z, 1, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, MID_VTX_RIGHT + 0, MID_VTX_RIGHT + 1, triEvent, zTriMin, zTriMax, z0, zx, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult = TraverseScanline<TEST_Z, 1, 1, TEXTURE_COORDINATES>(start, end, tileRowIdx, MID_VTX_RIGHT + 0, MID_VTX_RIGHT + 1, triEvent, zTriMin, zTriMax, z0, zx, texInterpolants, texture);
 
 					if (TEST_Z && cullResult == CullingResult::VISIBLE) // Early out if performing occlusion query
 						return CullingResult::VISIBLE;
@@ -1628,19 +1641,27 @@ public:
 			int tileMidRowIdx = simd_i32(bbMidIdx)[triIdx];
 			int tileEndRowIdx = simd_i32(bbTopIdx)[triIdx];
 
-			// Setup texture (u,v) interpolation parameters
-			Interpolant zInterpolant, uInterpolant, vInterpolant;
+			// Setup texture (u,v) interpolation parameters, TODO: Simdify
+			TextureInterpolants texInterpolants;
 			if (TEXTURE_COORDINATES)
 			{
-				zInterpolant.mDx = simd_f32(zPixelDx)[triIdx];
-				zInterpolant.mDy = simd_f32(zPixelDy)[triIdx];
-				zInterpolant.mVal0 = simd_f32(pVtxZ[0])[triIdx] - zInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - zInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
-				uInterpolant.mDx = simd_f32(uPixelDx)[triIdx];
-				uInterpolant.mDy = simd_f32(uPixelDy)[triIdx];
-				uInterpolant.mVal0 = simd_f32(pVtxU[0])[triIdx] - uInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - uInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
-				vInterpolant.mDx = simd_f32(vPixelDx)[triIdx];
-				vInterpolant.mDy = simd_f32(vPixelDy)[triIdx];
-				vInterpolant.mVal0 = simd_f32(pVtxV[0])[triIdx] - vInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - vInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
+				texInterpolants.zInterpolant.mDx = simd_f32(zPixelDx)[triIdx];
+				texInterpolants.zInterpolant.mDy = simd_f32(zPixelDy)[triIdx];
+				texInterpolants.zInterpolant.mVal0 = simd_f32(pVtxZ[0])[triIdx] - texInterpolants.zInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - texInterpolants.zInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
+				texInterpolants.uInterpolant.mDx = simd_f32(uPixelDx)[triIdx];
+				texInterpolants.uInterpolant.mDy = simd_f32(uPixelDy)[triIdx];
+				texInterpolants.uInterpolant.mVal0 = simd_f32(pVtxU[0])[triIdx] - texInterpolants.uInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - texInterpolants.uInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
+				texInterpolants.vInterpolant.mDx = simd_f32(vPixelDx)[triIdx];
+				texInterpolants.vInterpolant.mDy = simd_f32(vPixelDy)[triIdx];
+				texInterpolants.vInterpolant.mVal0 = simd_f32(pVtxV[0])[triIdx] - texInterpolants.vInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - texInterpolants.vInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
+			
+				texInterpolants.uDerivConsts[0] = texInterpolants.uInterpolant.mDx*texInterpolants.zInterpolant.mDy   - texInterpolants.uInterpolant.mDy*texInterpolants.zInterpolant.mDx;
+				texInterpolants.uDerivConsts[1] = texInterpolants.uInterpolant.mDx*texInterpolants.zInterpolant.mVal0 - texInterpolants.uInterpolant.mVal0*texInterpolants.zInterpolant.mDx;
+				texInterpolants.uDerivConsts[2] = texInterpolants.uInterpolant.mDy*texInterpolants.zInterpolant.mVal0 - texInterpolants.uInterpolant.mVal0*texInterpolants.zInterpolant.mDy;
+
+				texInterpolants.vDerivConsts[0] = texInterpolants.vInterpolant.mDx*texInterpolants.zInterpolant.mDy   - texInterpolants.vInterpolant.mDy*texInterpolants.zInterpolant.mDx;
+				texInterpolants.vDerivConsts[1] = texInterpolants.vInterpolant.mDx*texInterpolants.zInterpolant.mVal0 - texInterpolants.vInterpolant.mVal0*texInterpolants.zInterpolant.mDx;
+				texInterpolants.vDerivConsts[2] = texInterpolants.vInterpolant.mDy*texInterpolants.zInterpolant.mVal0 - texInterpolants.vInterpolant.mVal0*texInterpolants.zInterpolant.mDy;
 			}
 
 
@@ -1648,28 +1669,28 @@ public:
 			{
 #if PRECISE_COVERAGE != 0
 				if (triMidVtxRight)
-					cullResult &= RasterizeTriangle<TEST_Z, 1, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 1, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 				else
-					cullResult &= RasterizeTriangle<TEST_Z, 1, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 1, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 #else
 				if (triMidVtxRight)
-					cullResult &= RasterizeTriangle<TEST_Z, 1, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 1, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 				else
-					cullResult &= RasterizeTriangle<TEST_Z, 1, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 1, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 #endif
 			}
 			else
 			{
 #if PRECISE_COVERAGE != 0
 				if (triMidVtxRight)
-					cullResult &= RasterizeTriangle<TEST_Z, 0, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 0, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 				else
-					cullResult &= RasterizeTriangle<TEST_Z, 0, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 0, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slope, slopeTileDelta, edgeY, absEdgeX, slopeSign, eventStartRemainder, slopeTileRemainder, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 #else
 				if (triMidVtxRight)
-					cullResult &= RasterizeTriangle<TEST_Z, 0, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 0, 1, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 				else
-					cullResult &= RasterizeTriangle<TEST_Z, 0, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, zInterpolant, uInterpolant, vInterpolant, texture);
+					cullResult &= RasterizeTriangle<TEST_Z, 0, 0, TEXTURE_COORDINATES>(triIdx, bbWidth, tileRowIdx, tileMidRowIdx, tileEndRowIdx, eventStart, slopeFP, slopeTileDelta, zTriMin, zTriMax, z0, zx, zy, texInterpolants, texture);
 #endif
 			}
 
@@ -2388,7 +2409,7 @@ public:
 			// Setup and rasterize a SIMD batch of triangles
 			//////////////////////////////////////////////////////////////////////////////
 
-			RasterizeTriangleBatch<false, 0>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, scissor, nullptr);
+			//RasterizeTriangleBatch<false, 0>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, scissor, nullptr);
 #endif
 
 		}

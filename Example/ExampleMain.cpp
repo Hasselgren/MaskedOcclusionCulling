@@ -74,6 +74,31 @@ static void TonemapDepth(float *depth, unsigned char *image, int w, int h)
 	}
 }
 
+MaskedOcclusionTexture *CreateCircleTexture()
+{
+	MaskedOcclusionTexture *texture = MaskedOcclusionTexture::Create(256, 256);
+	
+	unsigned char *imgData = new unsigned char[256 * 256];
+	for (int y = 0; y < 256; ++y)
+	{
+		for (int x = 0; x < 256; ++x)
+		{
+			int dx = x - 128, dy = y - 128;
+			int lensqr = dx*dx + dy*dy;
+			if (lensqr < 10000)
+				imgData[x + y * 256] = 255;
+			else
+				imgData[x + y * 256] = 0;
+		}
+	}
+	texture->SetMipLevel(0, imgData, 0.5f);
+	texture->GenerateMipmaps();
+	texture->Finalize();
+	delete[] imgData;
+
+	return texture;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // Tutorial example code
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -117,9 +142,9 @@ int main(int argc, char* argv[])
 	// A triangle that intersects the view frustum
 	ClipspaceVertex triVerts[] = { { 5, 0, 0, 10 }, { 30, 0, 0, 20 }, { 10, 50, 0, 40 } };
 	unsigned int triIndices[] = { 0, 1, 2 };
-
+	/*
 	// Render the triangle
-	//moc->RenderTriangles((float*)triVerts, triIndices, 1);
+	moc->RenderTriangles((float*)triVerts, triIndices, 1);
 
 	// A clockwise winded (backfacing) triangle
 	ClipspaceVertex cwTriVerts[] = { { 7, -7, 0, 20 },{ 7.5, -7, 0, 20 },{ 7, -7.5, 0, 20 } };
@@ -148,25 +173,19 @@ int main(int argc, char* argv[])
 
 	// Render triangle with SoA layout
 	moc->RenderTriangles((float*)SoAVerts, triIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, SoAVertexLayout);
-
+	*/
 	////////////////////////////////////////////////////////////////////////////////////////
 	// Render textured occluder
 	////////////////////////////////////////////////////////////////////////////////////////
 
 	// A triangle that intersects the view frustum
 	float ttriVerts[] = { 
-		5, 0, 0, 10, 0, 0, 
-		30, 0, 0, 20, 1, 0, 
-		10, 50, 0, 40, 0, 1 };
+		-10, -10, 0, 20, 0, 0, 
+		20, -20, 0, 30, 6, 0, 
+		30, 30, 0, 60, 6, 4 };
 	unsigned int ttriIndices[] = { 0, 1, 2 };
 
-	MaskedOcclusionTexture *texture = MaskedOcclusionTexture::Create(256, 256);
-	unsigned char *imgData = new unsigned char[256 * 256];
-	memset(imgData, 0xff, 256 * 256);
-	texture->SetMipLevel(0, imgData, 0.5f);
-	texture->GenerateMipmaps();
-	texture->Finalize();
-
+	MaskedOcclusionTexture *texture = CreateCircleTexture();
 	MaskedOcclusionCulling::VertexLayout texLayout(6*sizeof(float), 4, 12, 16, 20);
 
 	moc->RenderTexturedTriangles((float*)ttriVerts, ttriIndices, 1, texture, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
@@ -174,9 +193,9 @@ int main(int argc, char* argv[])
 	////////////////////////////////////////////////////////////////////////////////////////
 	// Perform some occlusion queries
 	////////////////////////////////////////////////////////////////////////////////////////
-
+	
 	// A triangle, partly overlapped by the quad
-	ClipspaceVertex oqTriVerts[] = { { 0, 50, 0, 200 }, { -60, -60, 0, 200 }, { 20, -40, 0, 200 } };
+	ClipspaceVertex oqTriVerts[] = { { -100, 50, 0, 200 }, { -160, -60, 0, 200 }, { -120, -40, 0, 200 } };
 	unsigned int oqTriIndices[] = { 0, 1, 2 };
 
 	// Perform an occlusion query. The triangle is visible and the query should return VISIBLE
@@ -219,7 +238,7 @@ int main(int argc, char* argv[])
 		printf("Tested rect is OCCLUDED\n");
 	else if (result == MaskedOcclusionCulling::VIEW_CULLED)
 		printf("Tested rect is outside view frustum\n");
-
+		
 	// Compute a per pixel depth buffer from the hierarchical depth buffer, used for visualization.
 	float *perPixelZBuffer = new float[width * height];
 	moc->ComputePixelDepthBuffer(perPixelZBuffer);

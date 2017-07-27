@@ -223,12 +223,41 @@ double BenchmarkTrianglesD3D(ID3D11Buffer *buf, int numTriangles, bool color)
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////
+// Create a simple texture
+////////////////////////////////////////////////////////////////////////////////////////
+
+MaskedOcclusionTexture *CreateCircleTexture()
+{
+	MaskedOcclusionTexture *texture = MaskedOcclusionTexture::Create(256, 256);
+
+	unsigned char *imgData = new unsigned char[256 * 256];
+	for (int y = 0; y < 256; ++y)
+	{
+		for (int x = 0; x < 256; ++x)
+		{
+			int dx = x - 128, dy = y - 128;
+			int lensqr = dx*dx + dy*dy;
+			if (lensqr < 10000)
+				imgData[x + y * 256] = 255;
+			else
+				imgData[x + y * 256] = 0;
+		}
+	}
+	texture->SetMipLevel(0, imgData, 0.5f);
+	texture->GenerateMipmaps();
+	texture->Finalize();
+	delete[] imgData;
+
+	return texture;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////
 // Simple random triangle rasterizer benchmark
 ////////////////////////////////////////////////////////////////////////////////////////
 
 inline float frand() { return (float)rand() / (float)RAND_MAX; }
 
-void GenerateRandomTriangles(float *verts, unsigned int *triIdxBtF, int nTris, int size, float width, float height)
+void GenerateRandomTriangles(float *verts, unsigned int *triIdxBtF, int nTris, int size, float width, float height, bool texCoords = false)
 {
 	for (int idx = 0; idx < nTris; ++idx)
 	{
@@ -256,10 +285,22 @@ void GenerateRandomTriangles(float *verts, unsigned int *triIdxBtF, int nTris, i
 				float z = myz / (float)nTris;
 
 				int vtxIdx = idx * 3 + i;
-				verts[vtxIdx * 4 + 0] = rvtx[i][0] * myz;
-				verts[vtxIdx * 4 + 1] = rvtx[i][1] * myz;
-				verts[vtxIdx * 4 + 2] = z * myz;
-				verts[vtxIdx * 4 + 3] = myz;
+				if (texCoords)
+				{
+					verts[vtxIdx * 6 + 0] = rvtx[i][0] * myz;
+					verts[vtxIdx * 6 + 1] = rvtx[i][1] * myz;
+					verts[vtxIdx * 6 + 2] = z * myz;
+					verts[vtxIdx * 6 + 3] = myz;
+					verts[vtxIdx * 6 + 4] = i == 0 ? 0.0f : 1.0f;
+					verts[vtxIdx * 6 + 5] = i == 2 ? 1.0f : 0.0f;
+				}
+				else
+				{
+					verts[vtxIdx * 4 + 0] = rvtx[i][0] * myz;
+					verts[vtxIdx * 4 + 1] = rvtx[i][1] * myz;
+					verts[vtxIdx * 4 + 2] = z * myz;
+					verts[vtxIdx * 4 + 3] = myz;
+				}
 			}
 			if (triOk)
 				break;
@@ -273,6 +314,19 @@ double BenchmarkTriangles(float *verts, unsigned int *tris, int numTriangles, Ma
 
 	auto before = std::chrono::high_resolution_clock::now();
 	moc->RenderTriangles(verts, tris, numTriangles, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_NONE);
+	auto after = std::chrono::high_resolution_clock::now();
+
+	return std::chrono::duration<double>(after - before).count();
+}
+
+double BenchmarkTexturedTriangles(float *verts, unsigned int *tris, int numTriangles, MaskedOcclusionCulling *moc, MaskedOcclusionTexture *texture)
+{
+	moc->ClearBuffer();
+
+	MaskedOcclusionCulling::VertexLayout texLayout(6 * sizeof(float), 4, 12, 16, 20);
+
+	auto before = std::chrono::high_resolution_clock::now();
+	moc->RenderTexturedTriangles(verts, tris, numTriangles, texture, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_NONE, texLayout);
 	auto after = std::chrono::high_resolution_clock::now();
 
 	return std::chrono::duration<double>(after - before).count();
@@ -320,20 +374,26 @@ int main(int argc, char* argv[])
 	// Create randomized triangles for back-to-front and front-to-back rendering
 	////////////////////////////////////////////////////////////////////////////////////////
 
-	const int numTriangles[] = { 4096 * 1024, 4096 * 1024, 4096 * 1024, 2048 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024 };
-	const int sizes[] = { 10, 25, 50, 75, 100, 250, 500 };
+	//const int numTriangles[] = { 4096 * 1024, 4096 * 1024, 4096 * 1024, 2048 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024 };
+	//const int sizes[] = { 10, 25, 50, 75, 100, 250, 500 };
+
+	const int numTriangles[] = { 32*1024 };
+	const int sizes[] = { 250 };
 
 	int numSizes = sizeof(sizes) / sizeof(int);
 
 	printf("Generating randomized triangles");
 	std::vector<unsigned int *> trisBtF;
-	std::vector<float *>		verts;
+	std::vector<float *>		verts, texVerts;
 	for (int i = 0; i < numSizes; ++i)
 	{
 		float *pVerts = new float[numTriangles[i] * 4 * 3];
+		float *pTexVerts = new float[numTriangles[i] * 6 * 3];
 		unsigned int *pTrisBtF = new unsigned int[numTriangles[i] * 3];
-		GenerateRandomTriangles(pVerts, pTrisBtF, numTriangles[i], sizes[i], 1024.0f, 1024.0f);
+		GenerateRandomTriangles(pVerts, pTrisBtF, numTriangles[i], sizes[i], 1024.0f, 1024.0f, false);
+		GenerateRandomTriangles(pTexVerts, pTrisBtF, numTriangles[i], sizes[i], 1024.0f, 1024.0f, true);
 		verts.push_back(pVerts);
+		texVerts.push_back(pTexVerts);
 		trisBtF.push_back(pTrisBtF);
 #ifdef _WIN32
 		D3DAddTriangles(pVerts, numTriangles[i]);
@@ -363,6 +423,19 @@ int main(int argc, char* argv[])
 	{
 		int size = sizes[i];
 		double t = BenchmarkTriangles(verts[i], trisBtF[i], numTriangles[i], moc);
+		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
+		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
+		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
+	}
+
+	MaskedOcclusionTexture *texture = CreateCircleTexture();
+
+	printf("\n\nMasked single threaded - TEXTURED\n");
+	printf("----\n");
+	for (int i = 0; i < numSizes; ++i)
+	{
+		int size = sizes[i];
+		double t = BenchmarkTexturedTriangles(texVerts[i], trisBtF[i], numTriangles[i], moc, texture);
 		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
 		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
 		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);

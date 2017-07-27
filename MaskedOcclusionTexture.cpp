@@ -81,7 +81,7 @@ void MaskedOcclusionTextureInternal::FilterCorrection(unsigned int mipLevel)
 	int mipWidth = (int)max(1, mWidth >> mipLevel);
 	int mipHeight = (int)max(1, mHeight >> mipLevel);
 	unsigned char *data = &mRawData[mMiplevelOffset[mipLevel]];
-	unsigned char *occlusionData = &mRawData[mMiplevelOffset[mipLevel]];
+	unsigned char *occlusionData = &mOcclusionData[mMiplevelOffset[mipLevel]];
 
 	for (int y = 0; y < mipHeight; ++y)
 	{
