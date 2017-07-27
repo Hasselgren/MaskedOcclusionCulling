@@ -45,6 +45,8 @@ bool MaskedOcclusionTextureInternal::Initialize(unsigned int width, unsigned int
 	mHeight = height;
 	mMipLevels = 1 + (int)floor(log2f(max((float)width, (float)height)));
 
+	unsigned int mMiplevelOffset[16];
+
 	// Compute mip level offsets & size of entire mip chain
 	int totalSize = 0, mipWidth = width, mipHeight = height;
 	for (int mip = 0; mip < mMipLevels; ++mip)
@@ -53,6 +55,13 @@ bool MaskedOcclusionTextureInternal::Initialize(unsigned int width, unsigned int
 		totalSize += mipWidth*mipHeight;
 		mipWidth = max(1, mipWidth / 2);
 		mipHeight = max(1, mipHeight / 2);
+	}
+	mMiplevelConst = totalSize;
+
+	for (int mip = 0; mip < mMipLevels; ++mip)
+	{
+		int mipOffset = mMiplevelConst - (mMiplevelConst >> (2*mip));
+		assert(mipOffset >= mMiplevelOffset[mip]);
 	}
 
 	// Allocate memory for entire mip chain
@@ -72,6 +81,10 @@ MaskedOcclusionTextureInternal::~MaskedOcclusionTextureInternal()
 	mOcclusionData = nullptr;
 }
 
+int MaskedOcclusionTextureInternal::computeMipOffset(unsigned int mipLevel)
+{
+	return mMiplevelConst - (mMiplevelConst >> (2 * mipLevel));
+}
 
 /*
  * Bloats a miplevel
@@ -80,8 +93,8 @@ void MaskedOcclusionTextureInternal::FilterCorrection(unsigned int mipLevel)
 {
 	int mipWidth = (int)max(1, mWidth >> mipLevel);
 	int mipHeight = (int)max(1, mHeight >> mipLevel);
-	unsigned char *data = &mRawData[mMiplevelOffset[mipLevel]];
-	unsigned char *occlusionData = &mOcclusionData[mMiplevelOffset[mipLevel]];
+	unsigned char *data = &mRawData[computeMipOffset(mipLevel)];
+	unsigned char *occlusionData = &mOcclusionData[computeMipOffset(mipLevel)];
 
 	for (int y = 0; y < mipHeight; ++y)
 	{
@@ -111,11 +124,11 @@ void MaskedOcclusionTextureInternal::GenerateMipmap(unsigned int mipLevel)
 {
 	int mipWidth = max(1, mWidth >> mipLevel);
 	int mipHeight = max(1, mHeight >> mipLevel);
-	unsigned char *mipData = &mRawData[mMiplevelOffset[mipLevel]];
+	unsigned char *mipData = &mRawData[computeMipOffset(mipLevel)];
 
 	int prevMipWidth = max(1, mWidth >> (mipLevel - 1));
 	int prevMipHeight = max(1, mHeight >> (mipLevel - 1));
-	unsigned char *prevMipData = &mRawData[mMiplevelOffset[mipLevel - 1]];
+	unsigned char *prevMipData = &mRawData[computeMipOffset(mipLevel)];
 
 	for (int y = 0; y < mipHeight; ++y)
 	{
@@ -150,7 +163,7 @@ void MaskedOcclusionTextureInternal::SetMipLevel(unsigned int mipLevel, const un
 	// Perform alpha test and copy data. Copied data = 0 for opaque texels and ~0 for transparent texels
 	for (int y = 0; y < mipHeight; ++y)
 		for (int x = 0; x < mipWidth; ++x)
-			mRawData[x + y*mipWidth + mMiplevelOffset[mipLevel]] = ((float)data[x + y*mipWidth] / 255.0f) < alphaThreshold ? ~0 : 0;
+			mRawData[x + y*mipWidth + computeMipOffset(mipLevel)] = ((float)data[x + y*mipWidth] / 255.0f) < alphaThreshold ? ~0 : 0;
 }
 
 /*

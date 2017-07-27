@@ -28,7 +28,7 @@ public:
 	int             mWidth;                  //!< Width of image (in texels)
 	int             mHeight;                 //!< Height of image (in texels)
 	int             mMipLevels;              //!< Total number of mip levels
-	unsigned int    mMiplevelOffset[16];     //!< Data offset to certain mip level
+	unsigned int    mMiplevelConst;          //!< Constant tweakable to compute mip-level cheap
 	unsigned char   *mRawData;               //!< Raw data pointer. Data is one byte per texel, TODO: pack to 1 bit per texel?
 	unsigned char   *mOcclusionData;         //!< Raw data pointer. Data is one byte per texel, TODO: pack to 1 bit per texel?
 
@@ -48,6 +48,7 @@ public:
 
 private:
 	
+	int computeMipOffset(unsigned int mipLevel);
 	void FilterCorrection(unsigned int mipLevel);
 	void GenerateMipmap(unsigned int mipLevel);
 };

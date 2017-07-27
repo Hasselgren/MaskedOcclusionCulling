@@ -121,13 +121,13 @@ public:
 
 	struct Interpolant
 	{
-		float      mVal0;
-		float      mDx;
-		float      mDy;
+		__mw        mVal0;
+		__mw        mDx;
+		__mw        mDy;
 
 		FORCE_INLINE __mw interpolate(__mw pixelX, __mw pixelY)
 		{
-			return _mmw_fmadd_ps(_mmw_set1_ps(mDy), pixelY, _mmw_fmadd_ps(_mmw_set1_ps(mDx), pixelX, _mmw_set1_ps(mVal0)));
+			return _mmw_fmadd_ps(mDy, pixelY, _mmw_fmadd_ps(mDx, pixelX, mVal0));
 		}
 	};
 
@@ -139,8 +139,8 @@ public:
 		Interpolant vInterpolant;
 
 		// Constants for perspective corrected derivatives
-		float uDerivConsts[3];
-		float vDerivConsts[3];
+		__mw        uDerivConsts[3];
+		__mw        vDerivConsts[3];
 	};
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -786,7 +786,7 @@ public:
 	/*
 	 * Computes interpolation (plane) equations for a SIMD-batch of projected triangles
 	 */
-	FORCE_INLINE void InterpolationSetup(const __mw *pVtxX, const __mw *pVtxY, const __mw *pVtxA, __mw &aPixelDx, __mw &aPixelDy) const
+	FORCE_INLINE void InterpolationSetup(const __mw *pVtxX, const __mw *pVtxY, const __mw *pVtxA, __mw &aPixelDx, __mw &aPixelDy, __mw &aPixel0) const
 	{
 		// Setup z(x,y) = z0 + dx*x + dy*y screen space depth plane equation
 		__mw x2 = _mmw_sub_ps(pVtxX[2], pVtxX[0]);
@@ -798,6 +798,7 @@ public:
 		__mw d = _mmw_div_ps(_mmw_set1_ps(1.0f), _mmw_fmsub_ps(x1, y2, _mmw_mul_ps(y1, x2)));
 		aPixelDx = _mmw_mul_ps(_mmw_fmsub_ps(a1, y2, _mmw_mul_ps(y1, a2)), d);
 		aPixelDy = _mmw_mul_ps(_mmw_fmsub_ps(x1, a2, _mmw_mul_ps(a1, x2)), d);
+		aPixel0 = _mmw_sub_ps(pVtxA[0], _mmw_fmadd_ps(aPixelDy, pVtxY[0], _mmw_mul_ps(aPixelDx, pVtxX[0])));
 	}
 
 	/*
@@ -934,6 +935,14 @@ public:
 		static const float subtileOffsetX[16] = { 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f, 0.0f, 8.0f, 16.0f, 24.0f };
 		static const float subtileOffsetY[16] = { 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 4.0f, 4.0f, 4.0f, 8.0f, 8.0f, 8.0f, 8.0f, 12.0f, 12.0f, 12.0f, 12.0f };
 
+		// Texture constants used for mip / adress computation
+		__mwi texWidth      = _mmw_set1_epi32(texture->mWidth);
+		__mw  texWidthf     = _mmw_set1_ps((float)texture->mWidth);
+		__mw  texHeightf    = _mmw_set1_ps((float)texture->mWidth);
+		__mwi mipLevelConst = _mmw_set1_epi32(texture->mMiplevelConst);
+		__mwi mipLevels_1   = _mmw_set1_epi32(texture->mMipLevels - 1);
+		__mwi byteMask      = _mmw_set1_epi32(0xFF);
+
 		while (subtilesMask)
 		{
 			unsigned int subtileIdx = find_clear_lsb(&subtilesMask);
@@ -944,15 +953,15 @@ public:
 			unsigned int textureCoverageMask = 0;
 			unsigned int subtileCoverageMask = (unsigned int)simd_i32(coverageMask)[subtileIdx];
 
-			for (int py = 0; py < 4; py += 2) // TODO: Must be N x 2 tiles because of mask computation, use analytic derivatives instead?
+			for (int py = 0; py < 4; py += SIMD_PIXEL_H) // TODO: Must be N x 2 tiles because of mask computation, use analytic derivatives instead?
 			{
-				for (int px = 0; px < 8; px += (SIMD_LANES / 2))
+				for (int px = 0; px < 8; px += SIMD_PIXEL_W)
 				{
 					///////////////////////////////////////////////////////////////////////////////
 					// Early exit if mask is already zero
 					///////////////////////////////////////////////////////////////////////////////
 
-					unsigned int mask = Coverage2Lanes(subtileCoverageMask >> (px + py*8));
+					unsigned int mask = Coverage2Lanes(subtileCoverageMask >> (px + py*8)) & SIMD_ALL_LANES_MASK;
 					if (!mask)
 						continue;
 
@@ -975,23 +984,18 @@ public:
 
 					// Compute derivatives using arithmetic approach (allows processing individual pixels if desired)
 					__mw rcpZSqr = _mmw_mul_ps(rcpZ, rcpZ);
-					__mw dudx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, _mmw_set1_ps(texInterpolants.uDerivConsts[0]), _mmw_set1_ps(texInterpolants.uDerivConsts[1]))));
-					__mw dvdx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, _mmw_set1_ps(texInterpolants.vDerivConsts[0]), _mmw_set1_ps(texInterpolants.vDerivConsts[1]))));
-					__mw dudy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, _mmw_set1_ps(texInterpolants.uDerivConsts[0]), _mmw_set1_ps(texInterpolants.uDerivConsts[2])))); // Actually computes negative derivative, but it's canceled by the abs
-					__mw dvdy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, _mmw_set1_ps(texInterpolants.vDerivConsts[0]), _mmw_set1_ps(texInterpolants.vDerivConsts[2])))); // Actually computes negative derivative, but it's canceled by the abs
+					__mw dudx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, texInterpolants.uDerivConsts[0], texInterpolants.uDerivConsts[1])));
+					__mw dvdx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, texInterpolants.vDerivConsts[0], texInterpolants.vDerivConsts[1])));
+					__mw dudy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, texInterpolants.uDerivConsts[0], texInterpolants.uDerivConsts[2]))); // Actually computes negative derivative, but it's canceled by the abs
+					__mw dvdy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, texInterpolants.vDerivConsts[0], texInterpolants.vDerivConsts[2]))); // Actually computes negative derivative, but it's canceled by the abs
 
 					// Compute max length of derivative. This is the upper bound for the lod computation according to OpenGL 4.4 spec
 					__mw maxLen = _mmw_add_ps(_mmw_max_ps(dudx, dudy), _mmw_max_ps(dvdx, dvdy));
 
 					// Compute mip level, the log2 is computed by getting the fp32 exponent
-					__mwi exponentIEEE = _mmw_sub_epi32(_mmw_srli_epi32(simd_cast<__mwi>(maxLen), 23), _mmw_set1_epi32(126));
-					__mwi mipLevel = _mmw_add_epi32(_mmw_set1_epi32(texture->mMipLevels - 1), exponentIEEE);
-					mipLevel = _mmw_max_epi32(_mmw_setzero_epi32(), _mmw_min_epi32(_mmw_set1_epi32(texture->mMipLevels - 1), mipLevel));
-
-					__mw idudx = _mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), dudx);
-					__mw idvdx = _mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), dvdx);
-					__mw idudy = _mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), dudy);
-					__mw idvdy = _mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), dvdx);
+					__mwi exponentIEEE = _mmw_sub_epi32(_mmw_set1_epi32(126), _mmw_srli_epi32(simd_cast<__mwi>(maxLen), 23));
+					__mwi mipLevel = _mmw_sub_epi32(mipLevels_1, exponentIEEE);
+					mipLevel = _mmw_max_epi32(_mmw_setzero_epi32(), _mmw_min_epi32(mipLevels_1, mipLevel));
 
 					///////////////////////////////////////////////////////////////////////////////
 					// Texture address calculation
@@ -1002,23 +1006,23 @@ public:
 					__mw wrappedV = _mmw_sub_ps(v, _mmw_floor_ps(v));
 
 					// Compute miplevel 0 coordinate
-					__mwi ui0 = _mmw_cvttps_epi32(_mmw_mul_ps(_mmw_set1_ps((float)texture->mWidth), wrappedU));
-					__mwi vi0 = _mmw_cvttps_epi32(_mmw_mul_ps(_mmw_set1_ps((float)texture->mHeight), wrappedV));
+					__mwi ui0 = _mmw_cvttps_epi32(_mmw_mul_ps(texWidthf,  wrappedU));
+					__mwi vi0 = _mmw_cvttps_epi32(_mmw_mul_ps(texHeightf, wrappedV));
 
 					// Scale coordinate by miplevel
-					__mwi textureWidthN = _mmw_srlv_epi32(_mmw_set1_epi32(texture->mWidth), mipLevel);
+					__mwi textureWidthN = _mmw_srlv_epi32(texWidth, mipLevel);
 					__mwi uiN = _mmw_srlv_epi32(ui0, mipLevel);
 					__mwi viN = _mmw_srlv_epi32(vi0, mipLevel);
 
 					// Compute texture address for each lookup
-					__mwi mipLevelOffset = _mmw_i32gather_epi32((const int*)texture->mMiplevelOffset, mipLevel, 4);
+					__mwi mipLevelOffset = _mmw_sub_epi32(mipLevelConst, _mmw_srlv_epi32(mipLevelConst, _mmw_slli_epi32(mipLevel, 1)));
 					__mwi texelOffset = _mmw_add_epi32(_mmw_add_epi32(_mmw_mullo_epi32(viN, textureWidthN), uiN), mipLevelOffset);
 
 					///////////////////////////////////////////////////////////////////////////////
 					// Texture lookup & "alpha test"
 					///////////////////////////////////////////////////////////////////////////////
 
-					__mwi textureVal = _mmw_and_epi32(_mmw_set1_epi32(0xFF), _mmw_i32gather_epi32((const int*)texture->mOcclusionData, texelOffset, 1));
+					__mwi textureVal = _mmw_and_epi32(byteMask, _mmw_i32gather_epi32((const int*)texture->mOcclusionData, texelOffset, 1));
 					unsigned int textureMask = _mmw_movemask_ps(simd_cast<__mw>(_mmw_cmpeq_epi32(textureVal, _mmw_setzero_epi32())));
 
 					///////////////////////////////////////////////////////////////////////////////
@@ -1418,8 +1422,8 @@ public:
 		// Set up screen space depth plane
 		//////////////////////////////////////////////////////////////////////////////
 
-		__mw zPixelDx, zPixelDy;
-		InterpolationSetup(pVtxX, pVtxY, pVtxZ, zPixelDx, zPixelDy);
+		__mw zPixelDx, zPixelDy, zPixel0;
+		InterpolationSetup(pVtxX, pVtxY, pVtxZ, zPixelDx, zPixelDy, zPixel0);
 
 		// Compute z value at min corner of bounding box. Offset to make sure z is conservative for all 8x4 subtiles
 		__mw bbMinXV0 = _mmw_sub_ps(_mmw_cvtepi32_ps(bbPixelMinX), pVtxX[0]);
@@ -1446,11 +1450,19 @@ public:
 		// Set up texture (u, v) interpolation
 		//////////////////////////////////////////////////////////////////////////////
 
-		__mw uPixelDx, uPixelDy, vPixelDx, vPixelDy;
+		__mw uPixelDx, uPixelDy, uPixel0, vPixelDx, vPixelDy, vPixel0, uDerivConsts[3], vDerivConsts[3];
 		if (TEXTURE_COORDINATES)
 		{
-			InterpolationSetup(pVtxX, pVtxY, pVtxU, uPixelDx, uPixelDy);
-			InterpolationSetup(pVtxX, pVtxY, pVtxV, vPixelDx, vPixelDy);
+			InterpolationSetup(pVtxX, pVtxY, pVtxU, uPixelDx, uPixelDy, uPixel0);
+			InterpolationSetup(pVtxX, pVtxY, pVtxV, vPixelDx, vPixelDy, vPixel0);
+
+			uDerivConsts[0] = _mmw_fmsub_ps(uPixelDx, zPixelDy, _mmw_mul_ps(uPixelDy, zPixelDx));
+			uDerivConsts[1] = _mmw_fmsub_ps(uPixelDx, zPixel0,  _mmw_mul_ps(uPixel0,  zPixelDx));
+			uDerivConsts[2] = _mmw_fmsub_ps(uPixelDy, zPixel0,  _mmw_mul_ps(uPixel0,  zPixelDy));
+
+			vDerivConsts[0] = _mmw_fmsub_ps(vPixelDx, zPixelDy, _mmw_mul_ps(vPixelDy, zPixelDx));
+			vDerivConsts[1] = _mmw_fmsub_ps(vPixelDx, zPixel0,  _mmw_mul_ps(vPixel0,  zPixelDx));
+			vDerivConsts[2] = _mmw_fmsub_ps(vPixelDy, zPixel0,  _mmw_mul_ps(vPixel0,  zPixelDy));
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -1645,23 +1657,23 @@ public:
 			TextureInterpolants texInterpolants;
 			if (TEXTURE_COORDINATES)
 			{
-				texInterpolants.zInterpolant.mDx = simd_f32(zPixelDx)[triIdx];
-				texInterpolants.zInterpolant.mDy = simd_f32(zPixelDy)[triIdx];
-				texInterpolants.zInterpolant.mVal0 = simd_f32(pVtxZ[0])[triIdx] - texInterpolants.zInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - texInterpolants.zInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
-				texInterpolants.uInterpolant.mDx = simd_f32(uPixelDx)[triIdx];
-				texInterpolants.uInterpolant.mDy = simd_f32(uPixelDy)[triIdx];
-				texInterpolants.uInterpolant.mVal0 = simd_f32(pVtxU[0])[triIdx] - texInterpolants.uInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - texInterpolants.uInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
-				texInterpolants.vInterpolant.mDx = simd_f32(vPixelDx)[triIdx];
-				texInterpolants.vInterpolant.mDy = simd_f32(vPixelDy)[triIdx];
-				texInterpolants.vInterpolant.mVal0 = simd_f32(pVtxV[0])[triIdx] - texInterpolants.vInterpolant.mDx * simd_f32(pVtxX[0])[triIdx] - texInterpolants.vInterpolant.mDy * simd_f32(pVtxY[0])[triIdx];
+				texInterpolants.zInterpolant.mDx = _mmw_set1_ps(simd_f32(zPixelDx)[triIdx]);
+				texInterpolants.zInterpolant.mDy = _mmw_set1_ps(simd_f32(zPixelDy)[triIdx]);
+				texInterpolants.zInterpolant.mVal0 = _mmw_set1_ps(simd_f32(zPixel0)[triIdx]);
+				texInterpolants.uInterpolant.mDx = _mmw_set1_ps(simd_f32(uPixelDx)[triIdx]);
+				texInterpolants.uInterpolant.mDy = _mmw_set1_ps(simd_f32(uPixelDy)[triIdx]);
+				texInterpolants.uInterpolant.mVal0 = _mmw_set1_ps(simd_f32(uPixel0)[triIdx]);
+				texInterpolants.vInterpolant.mDx = _mmw_set1_ps(simd_f32(vPixelDx)[triIdx]);
+				texInterpolants.vInterpolant.mDy = _mmw_set1_ps(simd_f32(vPixelDy)[triIdx]);
+				texInterpolants.vInterpolant.mVal0 = _mmw_set1_ps(simd_f32(vPixel0)[triIdx]);
 			
-				texInterpolants.uDerivConsts[0] = texInterpolants.uInterpolant.mDx*texInterpolants.zInterpolant.mDy   - texInterpolants.uInterpolant.mDy*texInterpolants.zInterpolant.mDx;
-				texInterpolants.uDerivConsts[1] = texInterpolants.uInterpolant.mDx*texInterpolants.zInterpolant.mVal0 - texInterpolants.uInterpolant.mVal0*texInterpolants.zInterpolant.mDx;
-				texInterpolants.uDerivConsts[2] = texInterpolants.uInterpolant.mDy*texInterpolants.zInterpolant.mVal0 - texInterpolants.uInterpolant.mVal0*texInterpolants.zInterpolant.mDy;
+				texInterpolants.uDerivConsts[0] = _mmw_set1_ps(simd_f32(uDerivConsts[0])[triIdx]);
+				texInterpolants.uDerivConsts[1] = _mmw_set1_ps(simd_f32(uDerivConsts[1])[triIdx]);
+				texInterpolants.uDerivConsts[2] = _mmw_set1_ps(simd_f32(uDerivConsts[2])[triIdx]);
 
-				texInterpolants.vDerivConsts[0] = texInterpolants.vInterpolant.mDx*texInterpolants.zInterpolant.mDy   - texInterpolants.vInterpolant.mDy*texInterpolants.zInterpolant.mDx;
-				texInterpolants.vDerivConsts[1] = texInterpolants.vInterpolant.mDx*texInterpolants.zInterpolant.mVal0 - texInterpolants.vInterpolant.mVal0*texInterpolants.zInterpolant.mDx;
-				texInterpolants.vDerivConsts[2] = texInterpolants.vInterpolant.mDy*texInterpolants.zInterpolant.mVal0 - texInterpolants.vInterpolant.mVal0*texInterpolants.zInterpolant.mDy;
+				texInterpolants.vDerivConsts[0] = _mmw_set1_ps(simd_f32(vDerivConsts[0])[triIdx]);
+				texInterpolants.vDerivConsts[1] = _mmw_set1_ps(simd_f32(vDerivConsts[1])[triIdx]);
+				texInterpolants.vDerivConsts[2] = _mmw_set1_ps(simd_f32(vDerivConsts[2])[triIdx]);
 			}
 
 

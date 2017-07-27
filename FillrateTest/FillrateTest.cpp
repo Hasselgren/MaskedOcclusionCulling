@@ -404,29 +404,29 @@ int main(int argc, char* argv[])
 	////////////////////////////////////////////////////////////////////////////////////////
 	// Perform benchmarks
 	////////////////////////////////////////////////////////////////////////////////////////
-#ifdef _WIN32
-	printf("\nD3D Z only\n");
-	printf("----\n");
-	for (int i = 0; i < numSizes; ++i)
-	{
-		int size = sizes[i];
-		double t = BenchmarkTrianglesD3D(vBuffers[i], numTriangles[i], false);
-		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
-		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
-		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
-	}
-#endif
-
-	printf("\n\nMasked single threaded\n");
-	printf("----\n");
-	for (int i = 0; i < numSizes; ++i)
-	{
-		int size = sizes[i];
-		double t = BenchmarkTriangles(verts[i], trisBtF[i], numTriangles[i], moc);
-		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
-		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
-		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
-	}
+//#ifdef _WIN32
+//	printf("\nD3D Z only\n");
+//	printf("----\n");
+//	for (int i = 0; i < numSizes; ++i)
+//	{
+//		int size = sizes[i];
+//		double t = BenchmarkTrianglesD3D(vBuffers[i], numTriangles[i], false);
+//		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
+//		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
+//		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
+//	}
+//#endif
+//
+//	printf("\n\nMasked single threaded\n");
+//	printf("----\n");
+//	for (int i = 0; i < numSizes; ++i)
+//	{
+//		int size = sizes[i];
+//		double t = BenchmarkTriangles(verts[i], trisBtF[i], numTriangles[i], moc);
+//		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
+//		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
+//		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
+//	}
 
 	MaskedOcclusionTexture *texture = CreateCircleTexture();
 
@@ -441,19 +441,19 @@ int main(int argc, char* argv[])
 		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
 	}
 
-	int numThreads = std::thread::hardware_concurrency() - 1;
-	printf("\n\nMasked multi threaded (%d threads)\n", numThreads);
-	printf("----\n");
-	CullingThreadpool ctp(numThreads, 2, numThreads);
-	ctp.SetBuffer(moc);
-	ctp.WakeThreads();
-	for (int i = 0; i < numSizes; ++i)
-	{
-		int size = sizes[i];
-		double t = BenchmarkTrianglesThreaded(verts[i], trisBtF[i], numTriangles[i], &ctp);
-		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
-		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
-		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
-	}
-	ctp.SuspendThreads();
+	//int numThreads = std::thread::hardware_concurrency() - 1;
+	//printf("\n\nMasked multi threaded (%d threads)\n", numThreads);
+	//printf("----\n");
+	//CullingThreadpool ctp(numThreads, 2, numThreads);
+	//ctp.SetBuffer(moc);
+	//ctp.WakeThreads();
+	//for (int i = 0; i < numSizes; ++i)
+	//{
+	//	int size = sizes[i];
+	//	double t = BenchmarkTrianglesThreaded(verts[i], trisBtF[i], numTriangles[i], &ctp);
+	//	double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
+	//	double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
+	//	printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
+	//}
+	//ctp.SuspendThreads();
 }

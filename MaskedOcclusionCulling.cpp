@@ -94,10 +94,10 @@ typedef MaskedOcclusionCulling::VertexLayout    VertexLayout;
 #define SIMD_LANE_YCOORD_I _mm_setr_epi32(128, 384, 640, 896)
 #define SIMD_LANE_YCOORD_F _mm_setr_ps(128.0f, 384.0f, 640.0f, 896.0f)
 
-#define SIMD_LOW_HALF_MASK 0x3
-#define SIMD_HIGH_HALF_MASK 0xC
-#define SIMD_PIXEL_COL_OFFSET_F _mm_setr_ps(0, 1, 0, 1)
-#define SIMD_PIXEL_ROW_OFFSET_F _mm_setr_ps(0, 0, 1, 1)
+#define SIMD_PIXEL_W 4
+#define SIMD_PIXEL_H 1
+#define SIMD_PIXEL_COL_OFFSET_F _mm_setr_ps(0, 1, 2, 3)
+#define SIMD_PIXEL_ROW_OFFSET_F _mm_setr_ps(0, 0, 0, 0)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Common SSE2/SSE4.1 defines 
@@ -211,8 +211,8 @@ FORCE_INLINE void GatherVertices(__m128 *vtxX, __m128 *vtxY, __m128 *vtxW, __m12
 	}
 }
 
-FORCE_INLINE unsigned int Coverage2Lanes(unsigned int mask) { return (mask & 0x03) | ((mask >> 6) & 0xC); }
-FORCE_INLINE unsigned int Lanes2Coverage(unsigned int mask) { return (mask & 0x03) | ((mask << 6) & 0xC); }
+FORCE_INLINE unsigned int Coverage2Lanes(unsigned int mask) { return (mask & 0xF); }
+FORCE_INLINE unsigned int Lanes2Coverage(unsigned int mask) { return mask; }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // SSE4.1 version
