@@ -55,10 +55,10 @@
 #define SIMD_LANE_YCOORD_I _mm256_setr_epi32(128, 384, 640, 896, 1152, 1408, 1664, 1920)
 #define SIMD_LANE_YCOORD_F _mm256_setr_ps(128.0f, 384.0f, 640.0f, 896.0f, 1152.0f, 1408.0f, 1664.0f, 1920.0f)
 
-#define SIMD_PIXEL_W 8
-#define SIMD_PIXEL_H 1
-#define SIMD_PIXEL_COL_OFFSET_F _mm256_setr_ps(0, 1, 2, 3, 4, 5, 6, 7)
-#define SIMD_PIXEL_ROW_OFFSET_F _mm256_setr_ps(0, 0, 0, 0, 0, 0, 0, 0)
+#define SIMD_PIXEL_W 4
+#define SIMD_PIXEL_H 2
+#define SIMD_PIXEL_COL_OFFSET_F _mm256_setr_ps(0, 1, 2, 3, 0, 1, 2, 3)
+#define SIMD_PIXEL_ROW_OFFSET_F _mm256_setr_ps(0, 0, 0, 0, 1, 1, 1, 1)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // AVX specific typedefs and functions
@@ -218,8 +218,8 @@ namespace MaskedOcclusionCullingAVX2
 		}
 	}
 
-	FORCE_INLINE unsigned int Coverage2Lanes(unsigned int mask) { return (mask & 0xFF); }
-	FORCE_INLINE unsigned int Lanes2Coverage(unsigned int mask) { return mask; }
+	FORCE_INLINE unsigned int Coverage2Lanes(unsigned int mask) { return _pext_u32(mask, 0xF0F); }
+	FORCE_INLINE unsigned int Lanes2Coverage(unsigned int mask) { return _pdep_u32(mask, 0xF0F); }
 
 	static MaskedOcclusionCulling::Implementation gInstructionSet = MaskedOcclusionCulling::AVX2;
 

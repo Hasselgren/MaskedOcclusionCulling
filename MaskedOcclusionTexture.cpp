@@ -100,19 +100,21 @@ void MaskedOcclusionTextureInternal::FilterCorrection(unsigned int mipLevel)
 	{
 		for (int x = 0; x < mipWidth; ++x)
 		{
-			unsigned char occluded = 0;
-			for (int dy = -1; dy < 1; ++dy)
-			{
-				for (int dx = -1; dx < 1; ++dx)
-				{
-					int tx = x + dx;
-					int ty = y + dy;
-					tx = tx < 0 ? (mipWidth + tx) : (tx >= mipWidth ? tx - mipWidth : tx);
-					ty = ty < 0 ? (mipHeight + ty) : (ty >= mipHeight ? ty - mipHeight : ty);
-					occluded = max(occluded, data[tx + ty*mipWidth]);
-				}
-			}
-			occlusionData[x + y*mipWidth] = occluded;
+			//float occlusionVal = 0.0f;
+			//for (int dy = -1; dy < 1; ++dy)
+			//{
+			//	for (int dx = -1; dx < 1; ++dx)
+			//	{
+			//		int tx = x + dx;
+			//		int ty = y + dy;
+			//		tx = tx < 0 ? (mipWidth + tx) : (tx >= mipWidth ? tx - mipWidth : tx);
+			//		ty = ty < 0 ? (mipHeight + ty) : (ty >= mipHeight ? ty - mipHeight : ty);
+			//		occlusionVal += (float)data[tx + ty*mipWidth];
+			//	}
+			//}
+			//occlusionVal /= 9.0f;
+			//occlusionData[x + y*mipWidth] = (unsigned char)min(255, max(0, (int)ceil(occlusionVal)));
+			occlusionData[x + y*mipWidth] = data[x + y*mipWidth];
 		}
 	}
 }
@@ -128,7 +130,7 @@ void MaskedOcclusionTextureInternal::GenerateMipmap(unsigned int mipLevel)
 
 	int prevMipWidth = max(1, mWidth >> (mipLevel - 1));
 	int prevMipHeight = max(1, mHeight >> (mipLevel - 1));
-	unsigned char *prevMipData = &mRawData[computeMipOffset(mipLevel)];
+	unsigned char *prevMipData = &mRawData[computeMipOffset(mipLevel - 1)];
 
 	for (int y = 0; y < mipHeight; ++y)
 	{
@@ -141,13 +143,14 @@ void MaskedOcclusionTextureInternal::GenerateMipmap(unsigned int mipLevel)
 			int endY = (int)ceil((float)(y + 1)*(float)prevMipHeight / (float)mipHeight);
 
 			// Perform max boxfilter. Note, this could be optimized a lot, but it's supposed to happen load time.
-			unsigned char occlusionVal = 0;
+			float occlusionVal = 0.0f;
 			for (int fy = startY; fy < endY; ++fy)
 				for (int fx = startX; fx < endX; ++fx)
-					occlusionVal = max(occlusionVal, prevMipData[fx + fy*prevMipWidth]);
+					occlusionVal += (float)prevMipData[fx + fy*prevMipWidth];
+			occlusionVal /= (float)((endY - startY)*(endX - startX));
 
 			// Write data back
-			mipData[x + y*mipWidth] = occlusionVal;
+			mipData[x + y*mipWidth] = (unsigned char)min(255, max(0, (int)ceil(occlusionVal)));
 		}
 	}
 }

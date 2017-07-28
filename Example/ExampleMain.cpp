@@ -180,9 +180,9 @@ int main(int argc, char* argv[])
 
 	// A triangle that intersects the view frustum
 	float ttriVerts[] = { 
-		-10, -10, 0, 20, 0, 0, 
-		20, -20, 0, 30, 6, 0, 
-		30, 30, 0, 60, 6, 4 };
+		-30, -30, 0, 60, 0, 0, 
+		30, -30, 0, 60, 1, 0, 
+		30, 30, 0, 60, 1, 1 };
 	unsigned int ttriIndices[] = { 0, 1, 2 };
 
 	MaskedOcclusionTexture *texture = CreateCircleTexture();
