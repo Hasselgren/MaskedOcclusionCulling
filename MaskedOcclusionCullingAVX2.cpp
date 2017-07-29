@@ -96,8 +96,6 @@ typedef __m256i __mwi;
 #define _mmw_shuffle_ps             _mm256_shuffle_ps
 #define _mmw_insertf32x4_ps         _mm256_insertf128_ps
 #define _mmw_cvtepi32_ps            _mm256_cvtepi32_ps
-#define _mmw_blendv_epi32(a,b,c)    simd_cast<__mwi>(_mmw_blendv_ps(simd_cast<__mw>(a), simd_cast<__mw>(b), simd_cast<__mw>(c)))
-#define _mmw_i32gather_epi32        _mm256_i32gather_epi32
 
 #define _mmw_set1_epi32             _mm256_set1_epi32
 #define _mmw_setzero_epi32          _mm256_setzero_si256
@@ -125,6 +123,8 @@ typedef __m256i __mwi;
 #define _mmw_cvtps_epi32            _mm256_cvtps_epi32
 #define _mmw_cvttps_epi32           _mm256_cvttps_epi32
 #define _mmw_srlv_epi32(x, y)       _mm256_srlv_epi32(x, y)
+#define _mmw_blendv_epi32(a,b,c)    simd_cast<__mwi>(_mmw_blendv_ps(simd_cast<__mw>(a), simd_cast<__mw>(b), simd_cast<__mw>(c)))
+#define _mmw_i32gather_epi32        _mm256_i32gather_epi32
 
 #define _mmx_dp4_ps(a, b)           _mm_dp_ps(a, b, 0xFF)
 #define _mmx_fmadd_ps               _mm_fmadd_ps

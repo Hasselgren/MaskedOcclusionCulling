@@ -86,6 +86,16 @@ int MaskedOcclusionTextureInternal::computeMipOffset(unsigned int mipLevel)
 	return mMiplevelConst - (mMiplevelConst >> (2 * mipLevel));
 }
 
+int convertOcclusionVal(float occlusionVal)
+{
+	int flooredInt = (unsigned char)min(255, max(0, (int)floor(occlusionVal)));
+	int cieledInt = (unsigned char)min(255, max(0, (int)ceil(occlusionVal)));
+
+	if (flooredInt == 0 && cieledInt != 0)
+		return cieledInt;
+	return flooredInt;
+}
+
 /*
  * Bloats a miplevel
  */
@@ -150,7 +160,7 @@ void MaskedOcclusionTextureInternal::GenerateMipmap(unsigned int mipLevel)
 			occlusionVal /= (float)((endY - startY)*(endX - startX));
 
 			// Write data back
-			mipData[x + y*mipWidth] = (unsigned char)min(255, max(0, (int)ceil(occlusionVal)));
+			mipData[x + y*mipWidth] = convertOcclusionVal(occlusionVal);
 		}
 	}
 }

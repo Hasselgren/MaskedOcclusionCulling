@@ -47,7 +47,6 @@ public:
 	void Finalize() override;
 
 private:
-	
 	int computeMipOffset(unsigned int mipLevel);
 	void FilterCorrection(unsigned int mipLevel);
 	void GenerateMipmap(unsigned int mipLevel);

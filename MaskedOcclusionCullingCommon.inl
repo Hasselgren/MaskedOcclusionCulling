@@ -968,7 +968,7 @@ public:
 	/*
 	 *
 	 */
-	__mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t, TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
+	FORCE_INLINE __mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t, TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
 	{
 		// Do z-cull. The texture lookup is expensive, so we want to remove as much work as possible
 		coverageMask = _mmw_andnot_epi32(_mmw_srai_epi32(simd_cast<__mwi>(zDist0t), 31), coverageMask);
@@ -992,41 +992,41 @@ public:
 		///////////////////////////////////////////////////////////////////////////////
 
 		// Compute pixel coordinates for 4x4 tile corners. 
-		__mw subtileX1 = _mmw_add_ps(_mmw_set1_ps((float)(tilePixelX + SUB_TILE_WIDTH/4)), SIMD_SUB_TILE_COL_OFFSET_F);
-		__mw subtileX2 = _mmw_add_ps(subtileX1, _mmw_set1_ps(SUB_TILE_WIDTH / 2));
-		__mw subtileY = _mmw_add_ps(_mmw_set1_ps((float)(tilePixelY + SUB_TILE_HEIGHT/2)), SIMD_SUB_TILE_ROW_OFFSET_F);
+		__mw subtileX0 = _mmw_add_ps(_mmw_set1_ps((float)(tilePixelX + SUB_TILE_WIDTH / 4)), SIMD_SUB_TILE_COL_OFFSET_F);
+		__mw subtileX1 = _mmw_add_ps(subtileX0, _mmw_set1_ps(SUB_TILE_WIDTH / 2));
+		__mw subtileY  = _mmw_add_ps(_mmw_set1_ps((float)(tilePixelY + SUB_TILE_HEIGHT/2)), SIMD_SUB_TILE_ROW_OFFSET_F);
 
 		// Interpolate (u,v) for texture lookup = (u/z, v/z) / (1/z)
+		__mw rcpZ0 = _mmw_rcp_ps(texInterpolants.zInterpolant.interpolate(subtileX0, subtileY));
+		__mw u0 = _mmw_mul_ps(rcpZ0, texInterpolants.uInterpolant.interpolate(subtileX0, subtileY));
+		__mw v0 = _mmw_mul_ps(rcpZ0, texInterpolants.vInterpolant.interpolate(subtileX0, subtileY));
+
 		__mw rcpZ1 = _mmw_rcp_ps(texInterpolants.zInterpolant.interpolate(subtileX1, subtileY));
 		__mw u1 = _mmw_mul_ps(rcpZ1, texInterpolants.uInterpolant.interpolate(subtileX1, subtileY));
 		__mw v1 = _mmw_mul_ps(rcpZ1, texInterpolants.vInterpolant.interpolate(subtileX1, subtileY));
-		
-		__mw rcpZ2 = _mmw_rcp_ps(texInterpolants.zInterpolant.interpolate(subtileX2, subtileY));
-		__mw u2 = _mmw_mul_ps(rcpZ2, texInterpolants.uInterpolant.interpolate(subtileX2, subtileY));
-		__mw v2 = _mmw_mul_ps(rcpZ2, texInterpolants.vInterpolant.interpolate(subtileX2, subtileY));
 
 		// Compute texture LOD (mipmap level)
+		__mwi mipLevel0 = ComputeMipLevel<SUB_TILE_WIDTH / 2, SUB_TILE_HEIGHT>(subtileX0, subtileY, rcpZ0, texInterpolants, mipLevels_1);
 		__mwi mipLevel1 = ComputeMipLevel<SUB_TILE_WIDTH / 2, SUB_TILE_HEIGHT>(subtileX1, subtileY, rcpZ1, texInterpolants, mipLevels_1);
-		__mwi mipLevel2 = ComputeMipLevel<SUB_TILE_WIDTH / 2, SUB_TILE_HEIGHT>(subtileX2, subtileY, rcpZ2, texInterpolants, mipLevels_1);
 
 		// Compute address offsets for all loookups
+		__mwi texelOffset0 = ComputeTexelOffset(u0, v0, mipLevel0, texWidthf, texHeightf, texWidth, mipLevelConst);
 		__mwi texelOffset1 = ComputeTexelOffset(u1, v1, mipLevel1, texWidthf, texHeightf, texWidth, mipLevelConst);
-		__mwi texelOffset2 = ComputeTexelOffset(u2, v2, mipLevel2, texWidthf, texHeightf, texWidth, mipLevelConst);
 
 		///////////////////////////////////////////////////////////////////////////////
 		// Texture lookup & conservative alpha test
 		///////////////////////////////////////////////////////////////////////////////
 
+		__mwi textureVal0 = _mmw_and_epi32(byteMask, _mmw_i32gather_epi32((const int*)texture->mOcclusionData, texelOffset0, 1));
 		__mwi textureVal1 = _mmw_and_epi32(byteMask, _mmw_i32gather_epi32((const int*)texture->mOcclusionData, texelOffset1, 1));
-		__mwi textureVal2 = _mmw_and_epi32(byteMask, _mmw_i32gather_epi32((const int*)texture->mOcclusionData, texelOffset2, 1));
 
-		__mwi subtileCoveredMask1 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal1, _mmw_setzero_epi32()), _mmw_set1_epi32(0x0F0F0F0F));
-		__mwi subtileCoveredMask2 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal2, _mmw_setzero_epi32()), _mmw_set1_epi32(0xF0F0F0F0));
-		__mwi subtileTransparentMask1 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal1, byteMask), _mmw_set1_epi32(0x0F0F0F0F));
-		__mwi subtileTransparentMask2 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal2, byteMask), _mmw_set1_epi32(0xF0F0F0F0));
+		__mwi subtileCoveredMask0 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal0, _mmw_setzero_epi32()), _mmw_set1_epi32(0x0F0F0F0F));
+		__mwi subtileCoveredMask1 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal1, _mmw_setzero_epi32()), _mmw_set1_epi32(0xF0F0F0F0));
+		__mwi subtileTransparentMask0 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal0, byteMask), _mmw_set1_epi32(0x0F0F0F0F));
+		__mwi subtileTransparentMask1 = _mmw_and_epi32(_mmw_cmpeq_epi32(textureVal1, byteMask), _mmw_set1_epi32(0xF0F0F0F0));
 
-		__mwi subtileCoveredMask = _mmw_or_epi32(subtileCoveredMask1, subtileCoveredMask2);
-		__mwi subtileTransparentMask = _mmw_or_epi32(subtileTransparentMask1, subtileTransparentMask2);
+		__mwi subtileCoveredMask = _mmw_or_epi32(subtileCoveredMask0, subtileCoveredMask1);
+		__mwi subtileTransparentMask = _mmw_or_epi32(subtileTransparentMask0, subtileTransparentMask1);
 
 		// Remove the transparent blocks from the coverage mask
 		coverageMask = _mmw_andnot_epi32(subtileTransparentMask, coverageMask);
@@ -1052,9 +1052,14 @@ public:
 			unsigned int textureCoverageMask = 0;
 			unsigned int subtileCoverageMask = (unsigned int)simd_i32(coverageMask)[subtileIdx];
 
-			for (int py = 0; py < SUB_TILE_HEIGHT; py += SIMD_PIXEL_H)
+			for (int px = 0; px < SUB_TILE_WIDTH; px += SIMD_PIXEL_W)
 			{
-				for (int px = 0; px < SUB_TILE_WIDTH; px += SIMD_PIXEL_W)
+#define COARSE_TEXTURELOD
+#ifdef COARSE_TEXTURELOD
+				__mwi mipLevel = _mmw_set1_epi32(px == 0 ? simd_i32(mipLevel0)[subtileIdx] - 2 : simd_i32(mipLevel1)[subtileIdx] - 2); // 4x4 -> 1x1 pixels is 2 miplevels
+#endif
+
+				for (int py = 0; py < SUB_TILE_HEIGHT; py += SIMD_PIXEL_H)
 				{
 					///////////////////////////////////////////////////////////////////////////////
 					// Early exit if mask is already zero
@@ -1064,58 +1069,26 @@ public:
 					if (!mask)
 						continue;
 
-					///////////////////////////////////////////////////////////////////////////////
-					// Interpolation
-					///////////////////////////////////////////////////////////////////////////////
-
 					// Compute pixel coordinates
 					__mw pixelX = _mmw_add_ps(_mmw_set1_ps(subtilePixelX + px), SIMD_PIXEL_COL_OFFSET_F);
 					__mw pixelY = _mmw_add_ps(_mmw_set1_ps(subtilePixelY + py), SIMD_PIXEL_ROW_OFFSET_F);
+
+					///////////////////////////////////////////////////////////////////////////////
+					// Texture lookup: address computation
+					///////////////////////////////////////////////////////////////////////////////
 
 					// Interpolate (u,v) for texture lookup = (u/z, v/z) / (1/z)
 					__mw rcpZ = _mmw_rcp_ps(texInterpolants.zInterpolant.interpolate(pixelX, pixelY));
 					__mw u = _mmw_mul_ps(rcpZ, texInterpolants.uInterpolant.interpolate(pixelX, pixelY));
 					__mw v = _mmw_mul_ps(rcpZ, texInterpolants.vInterpolant.interpolate(pixelX, pixelY));
 
-					///////////////////////////////////////////////////////////////////////////////
-					// Mip level computation
-					///////////////////////////////////////////////////////////////////////////////
+#ifndef COARSE_TEXTURELOD
+					// Compute texture LOD (mipmap level)
+					__mwi mipLevel = ComputeMipLevel<1, 1>(subtileX0, subtileY, rcpZ0, texInterpolants, mipLevels_1);
+#endif
 
-					// Compute derivatives using arithmetic approach (allows processing individual pixels if desired)
-					__mw rcpZSqr = _mmw_mul_ps(rcpZ, rcpZ);
-					__mw dudx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, texInterpolants.uDerivConsts[0], texInterpolants.uDerivConsts[1])));
-					__mw dvdx = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmadd_ps(pixelY, texInterpolants.vDerivConsts[0], texInterpolants.vDerivConsts[1])));
-					__mw dudy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, texInterpolants.uDerivConsts[0], texInterpolants.uDerivConsts[2]))); // Actually computes negative derivative, but it's canceled by the abs
-					__mw dvdy = _mmw_abs_ps(_mmw_mul_ps(rcpZSqr, _mmw_fmsub_ps(pixelX, texInterpolants.vDerivConsts[0], texInterpolants.vDerivConsts[2]))); // Actually computes negative derivative, but it's canceled by the abs
-
-					// Compute max length of derivative. This is the upper bound for the lod computation according to OpenGL 4.4 spec
-					__mw maxLen = _mmw_add_ps(_mmw_max_ps(dudx, dudy), _mmw_max_ps(dvdx, dvdy));
-
-					// Compute mip level, the log2 is computed by getting the fp32 exponent
-					__mwi exponentIEEE = _mmw_sub_epi32(_mmw_set1_epi32(126), _mmw_srli_epi32(simd_cast<__mwi>(maxLen), 23));
-					__mwi mipLevel = _mmw_sub_epi32(mipLevels_1, exponentIEEE);
-					mipLevel = _mmw_max_epi32(_mmw_setzero_epi32(), _mmw_min_epi32(mipLevels_1, mipLevel));
-
-					///////////////////////////////////////////////////////////////////////////////
-					// Texture address calculation
-					///////////////////////////////////////////////////////////////////////////////
-
-					// Apply wrapping mode (currently only repeat is supported)
-					__mw wrappedU = _mmw_sub_ps(u, _mmw_floor_ps(u));
-					__mw wrappedV = _mmw_sub_ps(v, _mmw_floor_ps(v));
-
-					// Compute miplevel 0 coordinate
-					__mwi ui0 = _mmw_cvttps_epi32(_mmw_mul_ps(texWidthf,  wrappedU));
-					__mwi vi0 = _mmw_cvttps_epi32(_mmw_mul_ps(texHeightf, wrappedV));
-
-					// Scale coordinate by miplevel
-					__mwi textureWidthN = _mmw_srlv_epi32(texWidth, mipLevel);
-					__mwi uiN = _mmw_srlv_epi32(ui0, mipLevel);
-					__mwi viN = _mmw_srlv_epi32(vi0, mipLevel);
-
-					// Compute texture address for each lookup
-					__mwi mipLevelOffset = _mmw_sub_epi32(mipLevelConst, _mmw_srlv_epi32(mipLevelConst, _mmw_slli_epi32(mipLevel, 1)));
-					__mwi texelOffset = _mmw_add_epi32(_mmw_add_epi32(_mmw_mullo_epi32(viN, textureWidthN), uiN), mipLevelOffset);
+					// Compute texel addresses/offsets
+					__mwi texelOffset = ComputeTexelOffset(u, v, mipLevel, texWidthf, texHeightf, texWidth, mipLevelConst);
 
 					///////////////////////////////////////////////////////////////////////////////
 					// Texture lookup & "alpha test"
@@ -1816,7 +1789,7 @@ public:
 	 * Rasterizes a list of triangles. Wrapper for the API function, but templated with TEST_Z to allow re-using the same rasterization code both when rasterizing occluders and preforming occlusion tests.
 	 */
 	template<int TEST_Z, int TEXTURE_COORDINATES>
-	FORCE_INLINE CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, MaskedOcclusionTextureInternal *texture, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
+	CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, MaskedOcclusionTextureInternal *texture, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
 	{
 		assert(mMaskedHiZBuffer != nullptr);
 
@@ -2520,7 +2493,7 @@ public:
 			// Setup and rasterize a SIMD batch of triangles
 			//////////////////////////////////////////////////////////////////////////////
 
-			//RasterizeTriangleBatch<false, 0>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, scissor, nullptr);
+			RasterizeTriangleBatch<false, 0>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, scissor, nullptr);
 #endif
 
 		}

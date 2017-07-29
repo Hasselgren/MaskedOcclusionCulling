@@ -11,7 +11,7 @@ set(CMAKE_CONFIGURATION_TYPES Debug Release)
 set( MOC_AVX512_FILES MaskedOcclusionCullingAVX512.cpp )
 set( MOC_AVX2_FILES MaskedOcclusionCullingAVX2.cpp )
 set( MOC_SSE_FILES MaskedOcclusionCulling.cpp CullingThreadpool.cpp )
-set( MOC_INCLUDE_FILES MaskedOcclusionCulling.h CullingThreadpool.h CompilerSpecific.inl MaskedOcclusionCullingCommon.inl )
+set( MOC_INCLUDE_FILES MaskedOcclusionCulling.h CullingThreadpool.h CompilerSpecific.inl MaskedOcclusionCullingCommon.inl MaskedOcclusionTexture.cpp MaskedOcclusionTextureInternal.h)
 set( MOC_FILES ${MOC_AVX512_FILES} ${MOC_AVX2_FILES} ${MOC_SSE_FILES} ${MOC_INCLUDE_FILES} )
 
 #
@@ -27,15 +27,15 @@ endif()
 # Setup compiler flags for AVX-512 files
 #
 if (USE_AVX512)
-	SET_SOURCE_FILES_PROPERTIES( ${MOC_AVX512_FILES} PROPERTIES COMPILE_FLAGS "-DUSE_AVX512=1 -mavx512f -mavx512bw -mavx512dq -mavx2 -mfma -msse4.1" )
+	SET_SOURCE_FILES_PROPERTIES( ${MOC_AVX512_FILES} PROPERTIES COMPILE_FLAGS "-DUSE_AVX512=1 -mavx512f -mavx512bw -mavx512dq -mavx2 -mbmi2 -mfma -msse4.1" )
 else()
-	SET_SOURCE_FILES_PROPERTIES( ${MOC_AVX512_FILES} PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -msse4.1" )
+	SET_SOURCE_FILES_PROPERTIES( ${MOC_AVX512_FILES} PROPERTIES COMPILE_FLAGS "" )
 endif()
 
 #
 # Setup compiler flags for AVX2 files
 #
-SET_SOURCE_FILES_PROPERTIES( ${MOC_AVX2_FILES} PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -msse4.1" )
+SET_SOURCE_FILES_PROPERTIES( ${MOC_AVX2_FILES} PROPERTIES COMPILE_FLAGS "-mavx2 -mbmi2 -mfma -msse4.1" )
 
 #
 # Setup compiler flags for SSE4.1 / SSE2 files

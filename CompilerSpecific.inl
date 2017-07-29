@@ -25,6 +25,9 @@
 #if defined(_WIN32)	&& (defined(_MSC_VER) || defined(__INTEL_COMPILER) || defined(__clang__)) // Windows: MSVC / Intel compiler / clang
 	#include <intrin.h>
 	#include <new.h>
+#ifdef __clang__
+	#include <bmi2intrin.h>
+#endif
 
 	#define FORCE_INLINE __forceinline
 
