@@ -918,8 +918,11 @@ public:
 		zMin[1] = _mmw_blendv_ps(z1t, z0, simd_cast<__mw>(d1min));
 	}
 
+	/*
+	 * Compute texture LOD/mip level at a given pixel coordinate.
+	 */
 	template <int SCALE_X, int SCALE_Y>
-	FORCE_INLINE __mwi ComputeMipLevel(const __mw &x, const __mw &y, const __mw &rcpZ, TextureInterpolants &texInterpolants, const __mwi &mipLevels_1)
+	FORCE_INLINE __mwi ComputeTextureLOD(const __mw &x, const __mw &y, const __mw &rcpZ, TextureInterpolants &texInterpolants, const __mwi &mipLevels_1)
 	{
 		// Compute derivatives using arithmetic approach (allows processing individual pixels if desired)
 		__mw rcpZSqr = _mmw_mul_ps(rcpZ, rcpZ);
@@ -945,6 +948,9 @@ public:
 		return _mmw_max_epi32(_mmw_setzero_epi32(), _mmw_min_epi32(mipLevels_1, mipLevel));
 	}
 
+	/*
+	 * Compute the address (offset) of a specific texel at a given miplevel
+	 */
 	FORCE_INLINE __mwi ComputeTexelOffset(const __mw &u, const __mw &v, const __mwi &mipLevel, const __mw &texWidthf, const __mw &texHeightf, const __mwi texWidth, const __mwi &mipLevelConst)
 	{
 		// Apply wrapping mode (currently only repeat is supported)
@@ -966,9 +972,10 @@ public:
 	}
 
 	/*
-	 *
+	 * Performs "alpha testing". I.e. performs a pixel accurate lookup in a preprocessed occlusion 
+	 * texture, where the pixel is opaque if the texture contents is 255, and transparent otherwise
 	 */
-	FORCE_INLINE __mwi TextureLookup(int tileIdx, __mwi coverageMask, __mw zDist0t, TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
+	__mwi TextureAlphaTest(int tileIdx, __mwi coverageMask, __mw zDist0t, TextureInterpolants &texInterpolants, const MaskedOcclusionTextureInternal *texture)
 	{
 		// Do z-cull. The texture lookup is expensive, so we want to remove as much work as possible
 		coverageMask = _mmw_andnot_epi32(_mmw_srai_epi32(simd_cast<__mwi>(zDist0t), 31), coverageMask);
@@ -1006,8 +1013,8 @@ public:
 		__mw v1 = _mmw_mul_ps(rcpZ1, texInterpolants.vInterpolant.interpolate(subtileX1, subtileY));
 
 		// Compute texture LOD (mipmap level)
-		__mwi mipLevel0 = ComputeMipLevel<SUB_TILE_WIDTH / 2, SUB_TILE_HEIGHT>(subtileX0, subtileY, rcpZ0, texInterpolants, mipLevels_1);
-		__mwi mipLevel1 = ComputeMipLevel<SUB_TILE_WIDTH / 2, SUB_TILE_HEIGHT>(subtileX1, subtileY, rcpZ1, texInterpolants, mipLevels_1);
+		__mwi mipLevel0 = ComputeTextureLOD<SUB_TILE_WIDTH / 2, SUB_TILE_HEIGHT>(subtileX0, subtileY, rcpZ0, texInterpolants, mipLevels_1);
+		__mwi mipLevel1 = ComputeTextureLOD<SUB_TILE_WIDTH / 2, SUB_TILE_HEIGHT>(subtileX1, subtileY, rcpZ1, texInterpolants, mipLevels_1);
 
 		// Compute address offsets for all loookups
 		__mwi texelOffset0 = ComputeTexelOffset(u0, v0, mipLevel0, texWidthf, texHeightf, texWidth, mipLevelConst);
@@ -1084,7 +1091,7 @@ public:
 
 #ifndef COARSE_TEXTURELOD
 					// Compute texture LOD (mipmap level)
-					__mwi mipLevel = ComputeMipLevel<1, 1>(subtileX0, subtileY, rcpZ0, texInterpolants, mipLevels_1);
+					__mwi mipLevel = ComputeTextureLOD<1, 1>(subtileX0, subtileY, rcpZ0, texInterpolants, mipLevels_1);
 #endif
 
 					// Compute texel addresses/offsets
@@ -1168,7 +1175,7 @@ public:
 
 				// Perform conservative texture lookup for alpha tested triangles
 				if (TEXTURE_COORDINATES)
-					rastMask8x4 = TextureLookup(tileIdx, rastMask8x4, dist0, texInterpolants, texture);
+					rastMask8x4 = TextureAlphaTest(tileIdx, rastMask8x4, dist0, texInterpolants, texture);
 
 				if (TEST_Z)
 				{
@@ -1789,7 +1796,7 @@ public:
 	 * Rasterizes a list of triangles. Wrapper for the API function, but templated with TEST_Z to allow re-using the same rasterization code both when rasterizing occluders and preforming occlusion tests.
 	 */
 	template<int TEST_Z, int TEXTURE_COORDINATES>
-	CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, MaskedOcclusionTextureInternal *texture, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
+	FORCE_INLINE CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, MaskedOcclusionTextureInternal *texture, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
 	{
 		assert(mMaskedHiZBuffer != nullptr);
 

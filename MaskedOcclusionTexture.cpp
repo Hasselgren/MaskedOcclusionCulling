@@ -57,12 +57,13 @@ bool MaskedOcclusionTextureInternal::Initialize(unsigned int width, unsigned int
 		mipHeight = max(1, mipHeight / 2);
 	}
 	mMiplevelConst = totalSize;
-
+#ifdef DEBUG
 	for (int mip = 0; mip < mMipLevels; ++mip)
 	{
 		int mipOffset = mMiplevelConst - (mMiplevelConst >> (2*mip));
 		assert(mipOffset >= mMiplevelOffset[mip]);
 	}
+#endif
 
 	// Allocate memory for entire mip chain
 	mRawData = (unsigned char *)alignedAlloc(64, sizeof(unsigned char)*totalSize);
