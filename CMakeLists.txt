@@ -1,4 +1,10 @@
 #
+# Pull in asmjit
+#
+set(ASMJIT_EMBED TRUE)
+include(${CMAKE_CURRENT_SOURCE_DIR}/asmjit/CMakeLists.txt)
+
+#
 # CMake file for the masked occlusion culling library
 #
 set(CMAKE_SUPPRESS_REGENERATION true)
@@ -18,9 +24,9 @@ set( MOC_FILES ${MOC_AVX512_FILES} ${MOC_AVX2_FILES} ${MOC_SSE_FILES} ${MOC_INCL
 # Common compiler flags 
 #
 if(MSVC)
-	set(CMAKE_CXX_FLAGS "-std=c++11")
+	set(CMAKE_CXX_FLAGS "-DASMJIT_EMBED -DASMJIT_STATIC")
 else()
-	set(CMAKE_CXX_FLAGS "-std=c++11 -m64")
+	set(CMAKE_CXX_FLAGS "-DASMJIT_EMBED -DASMJIT_STATIC -std=c++11 -m64")
 endif()
 
 #
@@ -45,7 +51,7 @@ SET_SOURCE_FILES_PROPERTIES( ${MOC_SSE_FILES} PROPERTIES COMPILE_FLAGS "-msse4.1
 #
 # Create masked occlusion culling library
 #
-add_library( MaskedOcclusionCulling ${MOC_FILES} )
+add_library( MaskedOcclusionCulling STATIC ${MOC_FILES} ${ASMJIT_SRC} )
 
 #
 # Add folder to include path

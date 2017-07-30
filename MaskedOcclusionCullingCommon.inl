@@ -168,6 +168,10 @@ public:
 	__mwi           *mQueryDebugBuffer;
 #endif
 
+	// asmjit functions
+	JitRuntime      mRuntime;
+
+
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructors and state handling
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -194,6 +198,277 @@ public:
 		memset(&mStats, 0, sizeof(OcclusionCullingStatistics));
 
 		SetResolution(0, 0);
+
+		GenerateASM();
+	}
+
+	void ASM_UpdateTileQuick(X86Compiler &cc, X86Gp &tileAddr, X86Ymm &coverage, X86Ymm &zTri)
+	{
+		// Constants
+		X86Ymm bitsZeroConst = cc.newYmm("bitsZeroConst");
+		X86Mem bitsOneConst = cc.newYmmConst(0, Data256::fromU32(~0));
+		X86Mem float2_0 = cc.newYmmConst(0, Data256::fromF32(2.0f));
+		X86Mem float_max = cc.newYmmConst(0, Data256::fromF32(FLT_MAX));
+
+		// Registers / temporaries
+		X86Mem zMinPtr[2] = { x86::yword_ptr(tileAddr, 0), x86::yword_ptr(tileAddr, sizeof(__mw)) };
+		X86Ymm zMin[2] = { cc.newYmm("zMin[0]"), cc.newYmm("zMin[1]") };
+		X86Mem zMaskPtr = x86::yword_ptr(tileAddr, 2*sizeof(__mw));
+		X86Ymm zMask = cc.newYmm("zMask");
+
+		X86Ymm sub_t_0_sign = cc.newYmm("sub_t_0_sign");
+		X86Ymm diff_t_0_1 = cc.newYmm("diff_t_0_1");
+		X86Ymm deadLane = cc.newYmm("deadLane");
+		X86Ymm maskedCoverage = cc.newYmm("maskedCoverage");
+		X86Ymm fullyCoveredLane = cc.newYmm("fullyCoveredLane");
+		X86Ymm discardLayerMask = cc.newYmm("discardLayerMask");
+		X86Ymm zMaskFull = cc.newYmm("zMaskFull");
+		X86Ymm opA = cc.newYmm("opA");
+		X86Ymm opB = cc.newYmm("opB");
+		X86Ymm z1tMin = cc.newYmm("z1tMin");
+
+		cc.vpxor(bitsZeroConst, bitsZeroConst, bitsZeroConst);
+
+		// Read tile from memory
+		cc.vmovaps(zMin[0], zMinPtr[0]);
+		cc.vmovaps(zMin[1], zMinPtr[1]);
+		cc.vmovaps(zMask, zMaskPtr);
+
+		// Mask out all subtiles failing the depth test (don't update these subtiles)
+		cc.vsubps(sub_t_0_sign, zTri, zMin[0]);                                    // sub_t_0_sign = zTri - tile.zMin[0]
+		cc.vpsrad(sub_t_0_sign, sub_t_0_sign, 31);                                 // sub_t_0_sign >>= 31;
+		cc.vpcmpeqd(deadLane, coverage, bitsZeroConst);                            // deadLane = coverage == 0 ? ~0 : 0
+		cc.vpor(deadLane, deadLane, sub_t_0_sign);                                 // deadlane |= sub_t_0_sign
+		cc.vpandnd(maskedCoverage, sub_t_0_sign, coverage);                        // maskedCoverage = ~sub_t_0_sign & coverage
+
+		// Use distance heuristic to discard layer 1 if incoming triangle is significantly nearer to observer
+		// than the buffer contents. See Section 3.2 in "Masked Software Occlusion Culling"
+		cc.vaddps(diff_t_0_1, zTri, zMin[0]);                                      // diff_t_0_1 = zTri + tile.zMin[0]
+		cc.vpcmpeqd(fullyCoveredLane, maskedCoverage, bitsOneConst);               // maskedCoverage == ~0
+		cc.vfmsub231ps(diff_t_0_1, zMin[1], float2_0);                             // diff_t_0_1 = tile.zMin[1]*2.0f - diff_t_0_1
+		cc.vpsrad(diff_t_0_1, diff_t_0_1, 31);                                     // diff_t_0_1 >>=  31
+		cc.vpor(diff_t_0_1, diff_t_0_1, fullyCoveredLane);                         // diff_t_0_1 |= fullyCoveredLane
+		cc.vpandnd(discardLayerMask, deadLane, diff_t_0_1);                        // discardLayerMask = ~deadlane & diff_t_0_1
+
+		// Update the mask with incoming triangle coverage
+		cc.vpandnd(zMask, discardLayerMask, zMask);                                // zMask = ~discardLayerMask & zMask
+		cc.vpor(zMask, maskedCoverage, zMask);                                     // zMask |= maskedCoverage
+
+		// Compute new value for zMin[1]. This has one of four outcomes: zMin[1] = min(zMin[1], zTriv),  zMin[1] = zTriv,
+		// zMin[1] = FLT_MAX or unchanged, depending on if the layer is updated, discarded, fully covered, or not updated
+		cc.vpcmpeqd(zMaskFull, zMask, bitsOneConst);                               // zMaskFull = zMask == ~0 ? ~0 : 0
+		cc.vblendvps(opA, zTri, zMin[1], deadLane);                                // opA = deadLane & 0x80000000 ? zMin[1] : zTri
+		cc.vblendvps(opB, zMin[1], zTri, discardLayerMask);                        // opB = discardLayerMask & 0x80000000 ? zTri : zMin[1]
+		cc.vminps(z1tMin, opA, opB);                                               // z1tMin = min(opA, opB)
+		cc.vblendvps(zMin[1], z1tMin, float_max, zMaskFull);                       // zMin[1] = maskFull & 0x80000000 ? z1tMin : zMin[1]
+
+		// Propagate zMin[1] back to zMin[0] if tile was fully covered, and update the mask
+		cc.vblendvps(zMin[0], zMin[0], z1tMin, zMaskFull);                         // zMin[0] = zMaskFull & 0x80000000 ? z1tMin : zMin[0]
+		cc.vpandnd(zMask, zMaskFull, zMask);                                       // zMask = ~zMaskFull & zMask
+
+		// Write data back to tile
+		cc.vmovaps(zMinPtr[0], zMin[0]);
+		cc.vmovaps(zMinPtr[1], zMin[1]);
+		cc.vmovaps(zMaskPtr, zMask);
+	}
+
+	void ASM_TraverseTile(
+		X86Compiler &cc, int TEST_Z, int NRIGHT, int NLEFT,
+		X86Gp iTileAddr, X86Ymm bitsOneConst,
+		X86Ymm *left, X86Ymm *right,
+		X86Ymm &zTriMin, X86Ymm &zTriMax, X86Ymm &iz0, X86Ymm &zx)
+	{
+		// Registers
+		X86Ymm zMinBuf = cc.newYmm("zMinBuf");
+		X86Ymm zDistTriMin = cc.newYmm("zDistTriMin");
+		X86Ymm accumulatedMask = cc.newYmm("accumulatedMask");
+		X86Ymm tmpReg = cc.newYmm();
+		X86Gp  zDistMask = cc.newI32("zDistMask");
+
+		// Labels
+		Label L_Exit = cc.newLabel();
+
+		// Perform a coarse test to quickly discard occluded tiles
+		#if QUICK_MASK != 0
+			// Only use the reference layer (layer 0) to cull as it is always conservative
+			cc.vmovaps(zMinBuf, x86::yword_ptr(iTileAddr, 0));                         // zMinBuf = mMaskedHiZBuffer[tileIdx].mZMin[0]
+		#else
+			// TODO
+		#endif
+
+		cc.vsubps(zDistTriMin, zTriMax, zMinBuf);                                      // zDistTriMin = zTriMax - zMinBuf
+		cc.vmovmskps(zDistMask, zDistTriMin);                                          // zDistMask = movemask_ps(zDistTriMin)
+		cc.cmp(zDistMask, SIMD_ALL_LANES_MASK);                                        // if (zDistMask)
+		cc.jne(L_Exit);                                                                // {
+		{
+			// Compute coverage mask for entire 32xN using shift operations
+			cc.vpsllvd(accumulatedMask, bitsOneConst, left[0]);                        // accumulatedMask = ~0 >> left[0]
+			for (int i = 1; i < NLEFT; ++i)
+			{
+				cc.vpsllvd(tmpReg, bitsOneConst, left[i]);                             // tmpReg = ~0 >> left[i]
+				cc.vpandd(accumulatedMask, accumulatedMask, tmpReg);                   // accumulatedMask &= tmpReg
+			}
+			for (int i = 0; i < NRIGHT; ++i)
+			{
+				cc.vpsllvd(tmpReg, bitsOneConst, right[i]);                            // tmpReg = ~0 >> right[i]
+				cc.vpandnd(accumulatedMask, tmpReg, accumulatedMask);                  // accumulatedMask = ~tmpReg & accumulatedMask
+			}
+			
+			// Swizzle rasterization mask to 8x4 subtiles
+
+			//__mwi rastMask8x4 = _mmw_transpose_epi8(accumulatedMask);
+			//
+			//				// Perform conservative texture lookup for alpha tested triangles
+			//				if (TEXTURE_COORDINATES)
+			//					rastMask8x4 = TextureAlphaTest(tileIdx, rastMask8x4, dist0, texInterpolants, texture);
+			//
+			//				if (TEST_Z)
+			//				{
+			//					// Perform a conservative visibility test (test zMax against buffer for each covered 8x4 subtile)
+			//					__mw zSubTileMax = _mmw_min_ps(z0, zTriMax);
+			//					__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zSubTileMax, zMinBuf));
+			//
+			//					__mwi deadLane = _mmw_cmpeq_epi32(rastMask8x4, SIMD_BITS_ZERO);
+			//					zPass = _mmw_andnot_epi32(deadLane, zPass);
+			//#if QUERY_DEBUG_BUFFER != 0
+			//					__mwi debugVal = _mmw_blendv_epi32(_mmw_set1_epi32(0), _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(2), zPass), _mmw_not_epi32(deadLane));
+			//					mQueryDebugBuffer[tileIdx] = debugVal;
+			//#endif
+			//
+			//					if (!_mmw_testz_epi32(zPass, zPass))
+			//						return CullingResult::VISIBLE;
+			//				}
+			//				else
+			//				{
+			//					// Compute interpolated min for each 8x4 subtile and update the masked hierarchical z buffer entry
+			//					__mw zSubTileMin = _mmw_max_ps(z0, zTriMin);
+			//#if QUICK_MASK != 0
+			//					UpdateTileQuick(tileIdx, rastMask8x4, zSubTileMin);
+			//#else
+			//					UpdateTileAccurate(tileIdx, rastMask8x4, zSubTileMin);
+			//#endif
+			//				}
+		}
+		cc.bind(L_Exit);                                                               // }
+	}
+
+	int ASM_TraverseScanline(
+		X86Compiler &cc, int TEST_Z, int NRIGHT, int NLEFT, 
+		X86Gp iLeftOffset, X86Gp iRightOffset, X86Gp iTileIdx,
+		int rightEvent, int leftEvent, X86Ymm *iEvents,
+		X86Ymm &zTriMin, X86Ymm &zTriMax, X86Ymm &iz0, X86Ymm &zx)
+	{
+		// Constants
+		X86Ymm bitsZeroConst = cc.newYmm("bitsZeroConst");
+		X86Ymm bitsOneConst = cc.newYmm("bitsZeroConst");
+
+		// Registers
+		X86Ymm vLeftOffsetZ0 = cc.newYmm("vLeftOffset/z0");
+		X86Ymm eventOffset = cc.newYmm("eventOffset");
+		X86Ymm z0 = cc.newYmm("z0");
+		X86Ymm right[2], left[2];
+		X86Gp tileAddr = cc.newU64("tileAddr");
+		X86Gp tileAddrEnd = cc.newU64("tileAddrEnd");
+
+		cc.vpxor(bitsZeroConst, bitsZeroConst, bitsZeroConst);
+		cc.vpcmpeqd(bitsOneConst, bitsOneConst, bitsOneConst);
+
+		// Floor edge events to integer pixel coordinates (shift out fixed point bits)
+		cc.vmovd(vLeftOffsetZ0.xmm(), iLeftOffset);
+		cc.vpshufd(vLeftOffsetZ0.xmm(), vLeftOffsetZ0.xmm(), 0);
+		cc.vinsertf128(vLeftOffsetZ0, vLeftOffsetZ0, vLeftOffsetZ0.xmm(), 1);          // vLeftOffset = set1_epi32(leftOffset)
+		cc.vpslld(eventOffset, eventOffset, TILE_WIDTH_SHIFT);                         // eventOffset = vLeftOffset >> TILE_WIDTH_SHIFT
+
+		for (int i = 0; i < NRIGHT; ++i)
+		{
+			right[i] = cc.newYmm("right[%d]", i);
+			cc.vpsrad(right[i], iEvents[rightEvent + i], FP_BITS);                     // right[i] = events[rightEvent+i] >> FP_BITS
+			cc.vpsubd(right[i], right[i], eventOffset);                                // right[i] -= eventOffset
+			cc.vpmaxsd(right[i], right[i], bitsZeroConst);                             // right[i] = max(right[i], 0)
+		}
+
+		for (int i = 0; i < NLEFT; ++i)
+		{
+			left[i] = cc.newYmm("left[%d]", i);
+			cc.vpsrad(left[i], iEvents[leftEvent - i], FP_BITS);                       // left[i] = events[leftEvent-i] >> FP_BITS
+			cc.vpsubd(left[i], left[i], eventOffset);                                  // left[i] -= eventOffset
+			cc.vpmaxsd(left[i], left[i], bitsZeroConst);                               // left[i] = max(left[i], 0)
+		}
+
+		cc.vcvtdq2ps(vLeftOffsetZ0, vLeftOffsetZ0);                                    // vLeftOffsetZ0 = cvtepi32_ps(leftOffset);
+		cc.vfmadd132ps(vLeftOffsetZ0, zx, iz0);                                        // z0 = zx*leftOffset + iz0
+
+		// tileAddr = mMaskedHiZBuffer + sizeof(HiZTile)*iLeftOffset
+		cc.mov(tileAddr, iLeftOffset);
+		cc.shl(tileAddr, (TILE_HEIGHT_SHIFT + 2));
+		cc.lea(tileAddr, X86Mem(tileAddr, tileAddr, 1, 0));
+		cc.add(tileAddr, (uint64_t)mMaskedHiZBuffer);
+
+		// tileAddrEnd = mMaskedHiZBuffer + sizeof(HiZTile)*iRightOffset
+		cc.mov(tileAddrEnd, iRightOffset);
+		cc.shl(tileAddrEnd, (TILE_HEIGHT_SHIFT + 2));
+		cc.lea(tileAddrEnd, X86Mem(tileAddrEnd, tileAddrEnd, 1, 0));
+		cc.add(tileAddrEnd, (uint64_t)mMaskedHiZBuffer);
+
+		ASM_TraverseTile(
+			cc, TEST_Z, NRIGHT, NLEFT,
+			)
+
+//		for (;;)
+//		{
+//			if (TEST_Z)
+//				STATS_ADD(mStats.mOccludees.mNumTilesTraversed, 1);
+//			else
+//				STATS_ADD(mStats.mOccluders.mNumTilesTraversed, 1);
+//
+//
+//			// Update buffer address, interpolate z and edge events
+//			tileIdx++;
+//			if (tileIdx >= tileIdxEnd)
+//				break;
+//			z0 = _mmw_add_ps(z0, _mmw_set1_ps(zx));
+//			for (int i = 0; i < NRIGHT; ++i)
+//				right[i] = _mmw_subs_epu16(right[i], SIMD_TILE_WIDTH);	// Trick, use sub saturated to avoid checking against < 0 for shift (values should fit in 16 bits)
+//			for (int i = 0; i < NLEFT; ++i)
+//				left[i] = _mmw_subs_epu16(left[i], SIMD_TILE_WIDTH);
+//		}
+//
+//		return TEST_Z ? CullingResult::OCCLUDED : CullingResult::VISIBLE;
+	}
+
+	void GenerateASM()
+	{
+		CodeHolder code;
+		code.init(mRuntime.getCodeInfo());
+
+		X86Compiler cc(&code);
+		cc.addFunc(FuncSignature3<void, __mw*, __mw*, __mw*>());
+
+		X86Gp dstPtr = cc.newIntPtr();
+		X86Gp src1Ptr = cc.newIntPtr();
+		X86Gp src2Ptr = cc.newIntPtr();
+
+		X86Ymm tmp0 = cc.newYmm();
+		X86Ymm tmp1 = cc.newYmm();
+
+		cc.setArg(0, dstPtr);
+		cc.setArg(1, src1Ptr);
+		cc.setArg(2, src2Ptr);
+
+		cc.vmovups(tmp0, x86::yword_ptr(src1Ptr));
+		cc.vaddps(tmp1, tmp0, x86::yword_ptr(src2Ptr));
+		cc.vmovups(x86::yword_ptr(dstPtr), tmp1);
+
+		cc.endFunc();
+		cc.finalize();
+
+		typedef void(*Func)(__mw *, __mw*, __mw*);
+		Func fn;
+		mRuntime.add(&fn, &code);
+
+		__mw a = _mmw_set1_ps(3.5), b = _mmw_set1_ps(6.3), c;
+		fn(&c, &a, &b);
+		int ap = 0;
 	}
 
 	~MaskedOcclusionCullingPrivate() override

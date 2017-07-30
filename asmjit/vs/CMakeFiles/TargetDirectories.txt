@@ -1,0 +1,4 @@
+C:/git/asmjit/vs/CMakeFiles/asmjit.dir
+C:/git/asmjit/vs/CMakeFiles/INSTALL.dir
+C:/git/asmjit/vs/CMakeFiles/ALL_BUILD.dir
+C:/git/asmjit/vs/CMakeFiles/ZERO_CHECK.dir

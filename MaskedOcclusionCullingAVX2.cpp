@@ -21,6 +21,9 @@
 #include "MaskedOcclusionTextureInternal.h"
 #include "CompilerSpecific.inl"
 
+#include "asmjit\src\asmjit\asmjit.h"
+using namespace asmjit;
+
 #if defined(__MICROSOFT_COMPILER) && _MSC_VER < 1900
 	// If you remove/comment this error, the code will compile & use the SSE41 version instead.
 	#error Older versions than visual studio 2015 not supported due to compiler bug(s)

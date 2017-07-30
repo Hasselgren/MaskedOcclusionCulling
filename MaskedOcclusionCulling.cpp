@@ -22,6 +22,9 @@
 #include "MaskedOcclusionTextureInternal.h"
 #include "CompilerSpecific.inl"
 
+#include "asmjit\src\asmjit\asmjit.h"
+using namespace asmjit;
+
 #if defined(__AVX__) || defined(__AVX2__)
 	// For performance reasons, the MaskedOcclusionCullingAVX2/512.cpp files should be compiled with VEX encoding for SSE instructions (to avoid
 	// AVX-SSE transition penalties, see https://software.intel.com/en-us/articles/avoiding-avx-sse-transition-penalties). However, this file
@@ -429,6 +432,34 @@ MaskedOcclusionCulling *MaskedOcclusionCulling::Create()
 
 MaskedOcclusionCulling *MaskedOcclusionCulling::Create(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree)
 {
+
+	//asmjit::JitRuntime rt;
+
+	//asmjit::CodeHolder code;                        // Holds code and relocation information.
+	//code.init(rt.getCodeInfo());            // Initialize to the same arch as JIT runtime.
+
+	//asmjit::X86Compiler cc(&code);                  // Create and attach X86Compiler to `code`.
+	//cc.addFunc(asmjit::FuncSignature0<int>());      // Begin a function of `int fn(void)` signature.
+
+	//asmjit::X86Gp vReg = cc.newGpd();               // Create a 32-bit general purpose register.
+	//cc.mov(vReg, 15);                        // Move one to our virtual register `vReg`.
+	//cc.ret(vReg);                           // Return `vReg` from the function.
+
+	//cc.endFunc();                           // End of the function body.
+	//cc.finalize();                          // Translate and assemble the whole `cc` content.
+	//// ----> X86Compiler is no longer needed from here and can be destroyed <----
+
+	//typedef int(*Func)(void);
+	//Func fn;
+	//asmjit::Error err = rt.add(&fn, &code);         // Add the generated code to the runtime.
+	//if (err) return nullptr;                      // Handle a possible error returned by AsmJit.
+	//// ----> CodeHolder is no longer needed from here and can be destroyed <----
+
+	//int asjr = fn();                      // Execute the generated code.
+	//printf("%d\n", asjr);                 // Print the resulting "1".
+
+	//rt.release(fn);                         // RAII, but let's make it explicit.
+
 	MaskedOcclusionCulling *object = nullptr;
 
 	MaskedOcclusionCulling::Implementation impl = DetectCPUFeatures();

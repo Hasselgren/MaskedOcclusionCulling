@@ -27,6 +27,7 @@
 #endif
 
 #include "../MaskedOcclusionCulling.h"
+#include "../asmjit/src/asmjit/asmjit.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Image utility functions, minimal BMP writer and depth buffer tone mapping
