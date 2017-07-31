@@ -168,9 +168,13 @@ public:
 	__mwi           *mQueryDebugBuffer;
 #endif
 
-	// asmjit functions
+	// Asmjit Runtime
 	JitRuntime      mRuntime;
 
+	// Asmjit callout function(s)
+	typedef void(*ASM_UpdateTileQuickFN)(void *, __mwi*, __mw*);
+
+	ASM_UpdateTileQuickFN mASMUpdateTileQuick;
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructors and state handling
@@ -219,10 +223,10 @@ public:
 	void ASM_UpdateTileQuick(X86Compiler &cc, X86Gp &tileAddr, X86Ymm &coverage, X86Ymm &zTri)
 	{
 		// Constants
-		X86Ymm bitsZeroConst = cc.newYmm("bitsZeroConst");
-		X86Mem bitsOneConst = cc.newYmmConst(0, Data256::fromU32(~0));
-		X86Mem float2_0 = cc.newYmmConst(0, Data256::fromF32(2.0f));
-		X86Mem float_max = cc.newYmmConst(0, Data256::fromF32(FLT_MAX));
+		X86Ymm C_bitsZeroConst = cc.newYmm("bitsZeroConst");
+		X86Ymm C_bitsOneConst = cc.newYmm("bitsOneConst");
+		X86Mem C_float2_0 = cc.newYmmConst(0, Data256::fromF32(2.0f));
+		X86Mem C_float_max = cc.newYmmConst(0, Data256::fromF32(FLT_MAX));
 
 		// Registers / temporaries
 		X86Mem zMinPtr[2] = { x86::yword_ptr(tileAddr, 0), x86::yword_ptr(tileAddr, sizeof(__mw)) };
@@ -241,44 +245,45 @@ public:
 		X86Ymm opB = cc.newYmm("opB");
 		X86Ymm z1tMin = cc.newYmm("z1tMin");
 
-		cc.vpxor(bitsZeroConst, bitsZeroConst, bitsZeroConst);
+		cc.vpxor(C_bitsZeroConst, C_bitsZeroConst, C_bitsZeroConst);
+		cc.vpcmpeqd(C_bitsOneConst, C_bitsOneConst, C_bitsOneConst);
 
 		// Read tile from memory
 		cc.vmovaps(zMin[0], zMinPtr[0]);
 		cc.vmovaps(zMin[1], zMinPtr[1]);
 		cc.vmovaps(zMask, zMaskPtr);
-
+		
 		// Mask out all subtiles failing the depth test (don't update these subtiles)
 		cc.vsubps(sub_t_0_sign, zTri, zMin[0]);                                    // sub_t_0_sign = zTri - tile.zMin[0]
 		cc.vpsrad(sub_t_0_sign, sub_t_0_sign, 31);                                 // sub_t_0_sign >>= 31;
-		cc.vpcmpeqd(deadLane, coverage, bitsZeroConst);                            // deadLane = coverage == 0 ? ~0 : 0
+		cc.vpcmpeqd(deadLane, coverage, C_bitsZeroConst);                          // deadLane = coverage == 0 ? ~0 : 0
 		cc.vpor(deadLane, deadLane, sub_t_0_sign);                                 // deadlane |= sub_t_0_sign
-		cc.vpandnd(maskedCoverage, sub_t_0_sign, coverage);                        // maskedCoverage = ~sub_t_0_sign & coverage
+		cc.vpandn(maskedCoverage, sub_t_0_sign, coverage);                         // maskedCoverage = ~sub_t_0_sign & coverage
 
 		// Use distance heuristic to discard layer 1 if incoming triangle is significantly nearer to observer
 		// than the buffer contents. See Section 3.2 in "Masked Software Occlusion Culling"
 		cc.vaddps(diff_t_0_1, zTri, zMin[0]);                                      // diff_t_0_1 = zTri + tile.zMin[0]
-		cc.vpcmpeqd(fullyCoveredLane, maskedCoverage, bitsOneConst);               // maskedCoverage == ~0
-		cc.vfmsub231ps(diff_t_0_1, zMin[1], float2_0);                             // diff_t_0_1 = tile.zMin[1]*2.0f - diff_t_0_1
+		cc.vpcmpeqd(fullyCoveredLane, maskedCoverage, C_bitsOneConst);             // maskedCoverage == ~0
+		cc.vfmsub231ps(diff_t_0_1, zMin[1], C_float2_0);                           // diff_t_0_1 = tile.zMin[1]*2.0f - diff_t_0_1
 		cc.vpsrad(diff_t_0_1, diff_t_0_1, 31);                                     // diff_t_0_1 >>=  31
 		cc.vpor(diff_t_0_1, diff_t_0_1, fullyCoveredLane);                         // diff_t_0_1 |= fullyCoveredLane
-		cc.vpandnd(discardLayerMask, deadLane, diff_t_0_1);                        // discardLayerMask = ~deadlane & diff_t_0_1
+		cc.vpandn(discardLayerMask, deadLane, diff_t_0_1);                         // discardLayerMask = ~deadlane & diff_t_0_1
 
 		// Update the mask with incoming triangle coverage
-		cc.vpandnd(zMask, discardLayerMask, zMask);                                // zMask = ~discardLayerMask & zMask
+		cc.vpandn(zMask, discardLayerMask, zMask);                                 // zMask = ~discardLayerMask & zMask
 		cc.vpor(zMask, maskedCoverage, zMask);                                     // zMask |= maskedCoverage
 
 		// Compute new value for zMin[1]. This has one of four outcomes: zMin[1] = min(zMin[1], zTriv),  zMin[1] = zTriv,
 		// zMin[1] = FLT_MAX or unchanged, depending on if the layer is updated, discarded, fully covered, or not updated
-		cc.vpcmpeqd(zMaskFull, zMask, bitsOneConst);                               // zMaskFull = zMask == ~0 ? ~0 : 0
+		cc.vpcmpeqd(zMaskFull, zMask, C_bitsOneConst);                             // zMaskFull = zMask == ~0 ? ~0 : 0
 		cc.vblendvps(opA, zTri, zMin[1], deadLane);                                // opA = deadLane & 0x80000000 ? zMin[1] : zTri
 		cc.vblendvps(opB, zMin[1], zTri, discardLayerMask);                        // opB = discardLayerMask & 0x80000000 ? zTri : zMin[1]
 		cc.vminps(z1tMin, opA, opB);                                               // z1tMin = min(opA, opB)
-		cc.vblendvps(zMin[1], z1tMin, float_max, zMaskFull);                       // zMin[1] = maskFull & 0x80000000 ? z1tMin : zMin[1]
+		cc.vblendvps(zMin[1], z1tMin, C_float_max, zMaskFull);                     // zMin[1] = maskFull & 0x80000000 ? z1tMin : zMin[1]
 
 		// Propagate zMin[1] back to zMin[0] if tile was fully covered, and update the mask
 		cc.vblendvps(zMin[0], zMin[0], z1tMin, zMaskFull);                         // zMin[0] = zMaskFull & 0x80000000 ? z1tMin : zMin[0]
-		cc.vpandnd(zMask, zMaskFull, zMask);                                       // zMask = ~zMaskFull & zMask
+		cc.vpandn(zMask, zMaskFull, zMask);                                        // zMask = ~zMaskFull & zMask
 
 		// Write data back to tile
 		cc.vmovaps(zMinPtr[0], zMin[0]);
@@ -342,7 +347,7 @@ public:
 			for (int i = 0; i < NRIGHT; ++i)
 			{
 				cc.vpsllvd(tmpReg, bitsOneConst, right[i]);                            // tmpReg = ~0 >> right[i]
-				cc.vpandnd(rastMask32x1, tmpReg, rastMask32x1);                        // rastMask32x1 = ~tmpReg & rastMask32x1
+				cc.vpandn(rastMask32x1, tmpReg, rastMask32x1);                        // rastMask32x1 = ~tmpReg & rastMask32x1
 			}
 			
 			// Swizzle rasterization mask to 8x4 subtiles
@@ -362,7 +367,7 @@ public:
 				cc.vpcmpeqd(deadLane, rastMask8x4, bitsZeroConst);                     // deadLane = rastMask8x4 == 0 ? ~0 : 0
 				cc.vminps(zSubtileMax, z0, zTriMax);                                   // zSubtileMax = min(z0, zTriMax)
 				cc.vcmpps(zPass, zSubtileMax, zMinBuf, _CMP_GE_OQ);                    // zPass = zSubtileMax >= zMinBuf ? ~0 : 0
-				cc.vpandnd(zPass, deadLane, zPass);                                    // zPass = ~deadLane & zPass
+				cc.vpandn(zPass, deadLane, zPass);                                    // zPass = ~deadLane & zPass
 				//#if QUERY_DEBUG_BUFFER != 0
 				//	__mwi debugVal = _mmw_blendv_epi32(_mmw_set1_epi32(0), _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(2), zPass), _mmw_not_epi32(deadLane));
 				//	mQueryDebugBuffer[tileIdx] = debugVal;
@@ -541,7 +546,7 @@ public:
 				cc.add(endEvent, endDelta);                                            // endEvent += endDelta
 
 				// Traverse the scanline and update the masked hierarchical z buffer
-				ASM_TraverseScanline(cc, TEST_Z, 1, 1, TIGHT_TRAVERSAL, )
+				//ASM_TraverseScanline(cc, TEST_Z, 1, 1, TIGHT_TRAVERSAL, )
 
 				// move to the next scanline of tiles, update edge events and interpolate z
 				cc.add(tileRowIdx, tilesWidth);                                        // tileRowIdx += mTilesWidth;
@@ -866,33 +871,36 @@ public:
 		code.init(mRuntime.getCodeInfo());
 
 		X86Compiler cc(&code);
-		cc.addFunc(FuncSignature3<void, __mw*, __mw*, __mw*>());
+		cc.addFunc(FuncSignature3<void, void*, __mw*, __mw*>());
 
-		X86Gp dstPtr = cc.newIntPtr();
-		X86Gp src1Ptr = cc.newIntPtr();
-		X86Gp src2Ptr = cc.newIntPtr();
+		X86Gp tileAddr = cc.newIntPtr();
+		X86Gp coveragePtr = cc.newIntPtr();
+		X86Gp zTriPtr = cc.newIntPtr();
 
-		X86Ymm tmp0 = cc.newYmm();
-		X86Ymm tmp1 = cc.newYmm();
+		X86Ymm coverage = cc.newYmm();
+		X86Ymm zTri = cc.newYmm();
 
-		cc.setArg(0, dstPtr);
-		cc.setArg(1, src1Ptr);
-		cc.setArg(2, src2Ptr);
+		cc.setArg(0, tileAddr);
+		cc.setArg(1, coveragePtr);
+		cc.setArg(2, zTriPtr);
 
-		cc.vmovups(tmp0, x86::yword_ptr(src1Ptr));
-		cc.vaddps(tmp1, tmp0, x86::yword_ptr(src2Ptr));
-		cc.vmovups(x86::yword_ptr(dstPtr), tmp1);
+		cc.vmovaps(coverage, x86::yword_ptr(coveragePtr));
+		cc.vmovaps(zTri, x86::yword_ptr(zTriPtr));
+
+		//ASM_UpdateTileQuick(cc, tileAddr, coverage, zTri);
+		//ASM_TraverseScanline(cc, 0, 1, 1, 1, )
 
 		cc.endFunc();
 		cc.finalize();
 
-		typedef void(*Func)(__mw *, __mw*, __mw*);
-		Func fn;
-		mRuntime.add(&fn, &code);
+		//typedef void(*Func)(void *, __mw*, __mw*);
+		//Func fn;
+		mRuntime.add(&mASMUpdateTileQuick, &code);
 
-		__mw a = _mmw_set1_ps(3.5), b = _mmw_set1_ps(6.3), c;
-		fn(&c, &a, &b);
-		int ap = 0;
+		//__mwi a = _mmw_set1_epi32(~0);
+		//__mw b = _mmw_set1_ps(6.3), c[3];
+		//fn(&mMaskedHiZBuffer[0], (__mw*)&a, &b);
+		//int ap = 0;
 	}
 
 	~MaskedOcclusionCullingPrivate() override
@@ -1897,7 +1905,8 @@ public:
 					// Compute interpolated min for each 8x4 subtile and update the masked hierarchical z buffer entry
 					__mw zSubTileMin = _mmw_max_ps(z0, zTriMin);
 #if QUICK_MASK != 0
-					UpdateTileQuick(tileIdx, rastMask8x4, zSubTileMin);
+					//UpdateTileQuick(tileIdx, rastMask8x4, zSubTileMin);
+					mASMUpdateTileQuick(&mMaskedHiZBuffer[tileIdx], &rastMask8x4, &zSubTileMin);
 #else
 					UpdateTileAccurate(tileIdx, rastMask8x4, zSubTileMin);
 #endif
