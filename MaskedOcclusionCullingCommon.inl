@@ -14,6 +14,8 @@
 // under the License.
 ////////////////////////////////////////////////////////////////////////////////
 
+#include <stdio.h>
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Common defines and constants
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -206,8 +208,118 @@ public:
 		GenerateASM();
 	}
 
+	struct ASM_RegAllocator
+	{
+		bool gpRegs[16];
+		bool ymmRegs[16];
+
+		ASM_RegAllocator()
+		{
+			wipe();
+		}
+
+		void wipe()
+		{
+			for (int i = 0; i < 16; ++i)
+				gpRegs[i] = false;
+			for (int i = 0; i < 16; ++i)
+				ymmRegs[i] = false;
+		}
+
+		void printStats(const char *name)
+		{
+			int gpUsed = 0, ymmUsed = 0;
+			for (int i = 0; i < 16; ++i)
+				if (gpRegs[i]) gpUsed++;
+			for (int i = 0; i < 16; ++i)
+				if (ymmRegs[i]) ymmUsed++;
+			printf("%32s: %2d/16 GP, %2d/16 Ymm\n", name, gpUsed, ymmUsed);
+		}
+
+		X86Gp newI32(const char *name)
+		{
+			for (int i = 0; i < 16; ++i)
+			{
+				if (i != X86Gp::kIdSp && !gpRegs[i])
+				{
+					assert(x86OpData.gpq[i].r32().getId() == i);
+					printStats(name);
+					gpRegs[i] = true;
+					return x86OpData.gpq[i].r32();
+				}
+			}
+			assert(false); // Uh oh, ran out of registers. We don't do automatic spilling
+		}
+
+		X86Gp newI64(const char *name)
+		{
+			for (int i = 0; i < 16; ++i)
+			{
+				if (i != X86Gp::kIdSp && !gpRegs[i])
+				{
+					assert(x86OpData.gpq[i].r64().getId() == i);
+					printStats(name);
+					gpRegs[i] = true;
+					return x86OpData.gpq[i].r64();
+				}
+			}
+			assert(false); // Uh oh, ran out of registers. We don't do automatic spilling
+		}
+
+		X86Xmm newXmm(const char *name)
+		{
+			for (int i = 0; i < 16; ++i)
+			{
+				if (!ymmRegs[i])
+				{
+					assert(x86OpData.ymm[i].xmm().getId() == i);
+					printStats(name);
+					ymmRegs[i] = true;
+					return x86OpData.ymm[i].xmm();
+				}
+			}
+			assert(false); // Uh oh, ran out of registers. We don't do automatic spilling
+		}
+
+		X86Ymm newYmm(const char *name)
+		{
+			for (int i = 0; i < 16; ++i)
+			{
+				if (!ymmRegs[i])
+				{
+					assert(x86OpData.ymm[i].ymm().getId() == i);
+					printStats(name);
+					ymmRegs[i] = true;
+					return x86OpData.ymm[i].ymm();
+				}
+			}
+			assert(false); // Uh oh, ran out of registers. We don't do automatic spilling
+		}
+
+		void free(const X86Gp &reg)
+		{
+			assert(reg.getId() >= X86Gp::kIdAx && reg.getId() <= X86Gp::kIdR15 && reg.getId() != X86Gp::kIdSp);
+			gpRegs[reg.getId()] = false;
+		}
+
+		void free(const X86Xmm &reg)
+		{
+			assert(reg.getId() >= 0 && reg.getId() <= 15);
+			ymmRegs[reg.getId()] = false;
+		}
+
+		void free(const X86Ymm &reg)
+		{
+			assert(reg.getId() >= 0 && reg.getId() <= 15);
+			ymmRegs[reg.getId()] = false;
+		}
+
+	};
+
 	struct ASM_RasterizerConstants
 	{
+		mutable ASM_RegAllocator ra;
+
 		// Compile time constants
 		X86Mem simd_i_1;
 		X86Mem simd_i_pad_w_mask;
@@ -235,7 +347,7 @@ public:
 		X86Mem simd_f_horizontal_slope_delta;
 		X86Mem simd_f_neg_horizontal_slope_delta;
 
-		X86Mem i64_res_tiles_width;
+		X86Mem i64_scanline_step;
 		X86Mem i64_msoc_buffer_ptr;
 
 		template<class T> X86Mem ASM_newYmmConst(X86Compiler &cc, T val)
@@ -275,7 +387,7 @@ public:
 			simd_f_horizontal_slope_delta = cc.newStack(sizeof(__mw), sizeof(__mw), "simd_f_horizontal_slope_delta");
 			simd_f_neg_horizontal_slope_delta = cc.newStack(sizeof(__mw), sizeof(__mw), "simd_f_neg_horizontal_slope_delta");
 
-			i64_res_tiles_width = cc.newStack(sizeof(void*), sizeof(void*), "i64_res_tiles_width");
+			i64_scanline_step = cc.newStack(sizeof(void*), sizeof(void*), "i64_scanline_step");
 			i64_msoc_buffer_ptr = cc.newStack(sizeof(void*), sizeof(void*), "i64_msoc_buffer_ptr");
 		}
 	};
@@ -302,7 +414,9 @@ public:
 	void ASM_UpdateTileQuick(
 		X86Compiler &cc,
 		const ASM_RasterizerConstants &consts,
-		const X86Gp &tileAddr, 
+		const X86Ymm &C_zerobits,
+		const X86Ymm &C_onebits,
+		const X86Gp &tileAddr,
 		const X86Ymm &coverage, 
 		const X86Ymm &zTri)
 	{
@@ -313,68 +427,74 @@ public:
 
 		// Registers / temporaries
 		X86Mem zMinPtr[2] = { x86::yword_ptr(tileAddr, offsetof(ZTile, mZMin[0])), x86::yword_ptr(tileAddr, offsetof(ZTile, mZMin[1])) };
-		X86Ymm zMin[2] = { cc.newYmm("zMin[0]"), cc.newYmm("zMin[1]") };
 		X86Mem zMaskPtr = x86::yword_ptr(tileAddr, offsetof(ZTile, mMask));
-		X86Ymm zMask = cc.newYmm("zMask");
 
-		X86Ymm sub_t_0_sign = cc.newYmm("sub_t_0_sign");
-		X86Ymm diff_t_0_1 = cc.newYmm("diff_t_0_1");
-		X86Ymm deadLane = cc.newYmm("deadLane");
-		X86Ymm maskedCoverage = cc.newYmm("maskedCoverage");
-		X86Ymm fullyCoveredLane = cc.newYmm("fullyCoveredLane");
-		X86Ymm discardLayerMask = cc.newYmm("discardLayerMask");
-		X86Ymm zMaskFull = cc.newYmm("zMaskFull");
-		X86Ymm opA = cc.newYmm("opA");
-		X86Ymm opB = cc.newYmm("opB");
-		X86Ymm z1tMin = cc.newYmm("z1tMin");
-
-		X86Ymm C_zerobits = cc.newYmm("C_zerobits");
-		X86Ymm C_onebits = cc.newYmm("C_onebits");
-		
-		cc.vpxor(C_zerobits, C_zerobits, C_zerobits);
-		cc.vpcmpeqd(C_onebits, C_onebits, C_onebits);
-
-		// Read tile from memory
-		cc.vmovaps(zMin[0], zMinPtr[0]);
-		cc.vmovaps(zMin[1], zMinPtr[1]);
-		cc.vmovaps(zMask, zMaskPtr);
-		
 		// Mask out all subtiles failing the depth test (don't update these subtiles)
-		cc.vsubps(sub_t_0_sign, zTri, zMin[0]);                                    // sub_t_0_sign = zTri - tile.zMin[0]
+		X86Ymm sub_t_0_sign = consts.ra.newYmm("sub_t_0_sign");
+		cc.vsubps(sub_t_0_sign, zTri, zMinPtr[0]);                                 // sub_t_0_sign = zTri - tile.zMin[0]
 		cc.vpsrad(sub_t_0_sign, sub_t_0_sign, 31);                                 // sub_t_0_sign >>= 31;
+		X86Ymm deadLane = consts.ra.newYmm("deadLane");
 		cc.vpcmpeqd(deadLane, coverage, C_zerobits);                               // deadLane = coverage == 0 ? ~0 : 0
 		cc.vpor(deadLane, deadLane, sub_t_0_sign);                                 // deadlane |= sub_t_0_sign
+		X86Ymm maskedCoverage = consts.ra.newYmm("maskedCoverage");
 		cc.vpandn(maskedCoverage, sub_t_0_sign, coverage);                         // maskedCoverage = ~sub_t_0_sign & coverage
+		consts.ra.free(sub_t_0_sign);
 
 		// Use distance heuristic to discard layer 1 if incoming triangle is significantly nearer to observer
 		// than the buffer contents. See Section 3.2 in "Masked Software Occlusion Culling"
-		cc.vaddps(diff_t_0_1, zTri, zMin[0]);                                      // diff_t_0_1 = zTri + tile.zMin[0]
+		X86Ymm zMin1 = consts.ra.newYmm("zMin1");
+		cc.vmovaps(zMin1, zMinPtr[1]);
+		X86Ymm &diff_t_0_1 = consts.ra.newYmm("diff_t_0_1");
+		cc.vaddps(diff_t_0_1, zTri, zMinPtr[0]);                                   // diff_t_0_1 = zTri + tile.zMin[0]
+		X86Ymm fullyCoveredLane = consts.ra.newYmm("fullyCoveredLane");
 		cc.vpcmpeqd(fullyCoveredLane, maskedCoverage, C_onebits);                  // maskedCoverage == ~0
-		cc.vfmsub231ps(diff_t_0_1, zMin[1], consts.simd_f_2_0);                    // diff_t_0_1 = tile.zMin[1]*2.0f - diff_t_0_1
+		cc.vfmsub231ps(diff_t_0_1, zMin1, consts.simd_f_2_0);                      // diff_t_0_1 = tile.zMin1*2.0f - diff_t_0_1
 		cc.vpsrad(diff_t_0_1, diff_t_0_1, 31);                                     // diff_t_0_1 >>=  31
 		cc.vpor(diff_t_0_1, diff_t_0_1, fullyCoveredLane);                         // diff_t_0_1 |= fullyCoveredLane
+		consts.ra.free(fullyCoveredLane);
+		X86Ymm discardLayerMask = consts.ra.newYmm("discardLayerMask");
 		cc.vpandn(discardLayerMask, deadLane, diff_t_0_1);                         // discardLayerMask = ~deadlane & diff_t_0_1
+		consts.ra.free(diff_t_0_1);
 
 		// Update the mask with incoming triangle coverage
-		cc.vpandn(zMask, discardLayerMask, zMask);                                 // zMask = ~discardLayerMask & zMask
+		X86Ymm zMask = consts.ra.newYmm("zMask");
+		cc.vpandn(zMask, discardLayerMask, zMaskPtr);                              // zMask = ~discardLayerMask & tile.zMask
 		cc.vpor(zMask, maskedCoverage, zMask);                                     // zMask |= maskedCoverage
+		consts.ra.free(maskedCoverage);
 
 		// Compute new value for zMin[1]. This has one of four outcomes: zMin[1] = min(zMin[1], zTriv),  zMin[1] = zTriv,
 		// zMin[1] = FLT_MAX or unchanged, depending on if the layer is updated, discarded, fully covered, or not updated
+		X86Ymm zMaskFull = consts.ra.newYmm("zMaskFull");
 		cc.vpcmpeqd(zMaskFull, zMask, C_onebits);                                  // zMaskFull = zMask == ~0 ? ~0 : 0
-		cc.vblendvps(opA, zTri, zMin[1], deadLane);                                // opA = deadLane & 0x80000000 ? zMin[1] : zTri
-		cc.vblendvps(opB, zMin[1], zTri, discardLayerMask);                        // opB = discardLayerMask & 0x80000000 ? zTri : zMin[1]
+		X86Ymm opA = consts.ra.newYmm("opA");
+		cc.vblendvps(opA, zTri, zMin1, deadLane);                                  // opA = deadLane & 0x80000000 ? zMin1 : zTri
+		consts.ra.free(deadLane);
+		X86Ymm opB = consts.ra.newYmm("opB");
+		cc.vblendvps(opB, zMin1, zTri, discardLayerMask);                          // opB = discardLayerMask & 0x80000000 ? zTri : zMin1
+		consts.ra.free(discardLayerMask);
+		X86Ymm z1tMin = consts.ra.newYmm("z1tMin");
 		cc.vminps(z1tMin, opA, opB);                                               // z1tMin = min(opA, opB)
-		cc.vblendvps(zMin[1], z1tMin, consts.simd_f_flt_max, zMaskFull);           // zMin[1] = maskFull & 0x80000000 ? z1tMin : zMin[1]
+		consts.ra.free(opA);
+		consts.ra.free(opB);
+		cc.vblendvps(zMin1, z1tMin, consts.simd_f_flt_max, zMaskFull);             // zMin1 = maskFull & 0x80000000 ? z1tMin : zMin1
 
 		// Propagate zMin[1] back to zMin[0] if tile was fully covered, and update the mask
-		cc.vblendvps(zMin[0], zMin[0], z1tMin, zMaskFull);                         // zMin[0] = zMaskFull & 0x80000000 ? z1tMin : zMin[0]
+		X86Ymm zMin0 = consts.ra.newYmm("zMin0");
+		cc.vmovaps(zMin0, zMinPtr[0]);
+		cc.vblendvps(zMin0, zMin0, z1tMin, zMaskFull);                             // zMin0 = zMaskFull & 0x80000000 ? z1tMin : zMin0
+		consts.ra.free(z1tMin);
 		cc.vpandn(zMask, zMaskFull, zMask);                                        // zMask = ~zMaskFull & zMask
+		consts.ra.free(zMaskFull);
 
 		// Write data back to tile
-		cc.vmovaps(zMinPtr[0], zMin[0]);
-		cc.vmovaps(zMinPtr[1], zMin[1]);
+		cc.vmovaps(zMinPtr[0], zMin0);
+		consts.ra.free(zMin0);
+		cc.vmovaps(zMinPtr[1], zMin1);
+		consts.ra.free(zMin1);
 		cc.vmovaps(zMaskPtr, zMask);
+		consts.ra.free(zMask);
+
+		consts.ra.printStats("ASM_UpdateTileQuick");
 	}
 
 	void ASM_ComputeBoundingBox(
@@ -393,10 +513,10 @@ public:
 		cc.mov(_debug_name, 123456789);
 #endif
 
-		X86Ymm pVtxX0 = cc.newYmm("pVtxX0");
-		X86Ymm pVtxY0 = cc.newYmm("pVtxY0");
-
+		X86Ymm pVtxX0 = consts.ra.newYmm("pVtxX0");
 		cc.vmovaps(pVtxX0, pVtxX[0]);                                              // pVtxX0 = pVtxX[0]
+
+		X86Ymm pVtxY0 = consts.ra.newYmm("pVtxY0");
 		cc.vmovaps(pVtxY0, pVtxY[0]);                                              // pVtxY0 = pVtxY[0]
 
 		// Find Min/Max vertices
@@ -409,10 +529,12 @@ public:
 		cc.vcvttps2dq(bbPixelMinY, bbPixelMinY);                                   // bbPixelMinY = cvttps_epi32(bbPixelMinY)
 
 		cc.vmaxps(bbPixelMaxX, pVtxX0, pVtxX[1]);                                  // bbPixelMaxX = min(pVtxX[0], pVtxX[1])
+		consts.ra.free(pVtxX0);
 		cc.vmaxps(bbPixelMaxX, bbPixelMaxX, pVtxX[2]);                             // bbPixelMaxX = min(bbPixelMaxX, pVtxX[1])
 		cc.vcvttps2dq(bbPixelMaxX, bbPixelMaxX);                                   // bbPixelMaxX = cvttps_epi32(bbPixelMaxX)
 
 		cc.vmaxps(bbPixelMaxY, pVtxY0, pVtxY[1]);                                  // bbPixelMaxY = min(pVtxY[0], pVtxY[1])
+		consts.ra.free(pVtxY0);
 		cc.vmaxps(bbPixelMaxY, bbPixelMaxY, pVtxY[2]);                             // bbPixelMaxY = min(bbPixelMaxY, pVtxY[1])
 		cc.vcvttps2dq(bbPixelMaxY, bbPixelMaxY);                                   // bbPixelMaxY = cvttps_epi32(bbPixelMaxY)
 
@@ -425,7 +547,10 @@ public:
 		cc.vpand(bbPixelMaxY, bbPixelMaxY, consts.simd_i_pad_h_mask);              // bbPixelMaxY &= ~(TILE_HEIGHT - 1)
 
 		// Clip to scissor
-		X86Ymm scissorMinX = cc.newYmm("scissorMinX"), scissorMinY = cc.newYmm("scissorMinY"), scissorMaxX = cc.newYmm("scissorMaxX"), scissorMaxY = cc.newYmm("scissorMaxY");
+		X86Ymm scissorMinX = consts.ra.newYmm("scissorMinX");
+		X86Ymm scissorMinY = consts.ra.newYmm("scissorMinY");
+		X86Ymm scissorMaxX = consts.ra.newYmm("scissorMaxX");
+		X86Ymm scissorMaxY = consts.ra.newYmm("scissorMaxY");
 		ASM_set1(cc, scissorMinX, x86::dword_ptr(scissorPtr, offsetof(ScissorRect, mMinX)));
 		ASM_set1(cc, scissorMinY, x86::dword_ptr(scissorPtr, offsetof(ScissorRect, mMinY)));
 		ASM_set1(cc, scissorMaxX, x86::dword_ptr(scissorPtr, offsetof(ScissorRect, mMaxX)));
@@ -434,6 +559,10 @@ public:
 		cc.vpmaxsd(bbPixelMinY, bbPixelMinY, scissorMinY);                         // bbminY = max(bbminY, scissor->mMinY)
 		cc.vpminsd(bbPixelMaxX, bbPixelMaxX, scissorMaxX);                         // bbmaxX = max(bbmaxX, scissor->mMaxX)
 		cc.vpminsd(bbPixelMaxY, bbPixelMaxY, scissorMaxY);                         // bbmaxY = max(bbmaxY, scissor->mMaxY)
+		consts.ra.free(scissorMinX);
+		consts.ra.free(scissorMinY);
+		consts.ra.free(scissorMaxX);
+		consts.ra.free(scissorMaxY);
 	}
 
 	void ASM_InterpolationSetup(
@@ -446,48 +575,54 @@ public:
 		X86Ymm &pVtxY0,
 		X86Ymm &pVtxA0,
 		X86Ymm &aPixelDx,
-		X86Ymm &aPixelDy, 
-		X86Ymm &aPixel0)
+		X86Ymm &aPixelDy)
 	{
 #ifdef _DEBUG
 		X86Gp _debug_name = cc.newU32("ASM_InterpolationSetup");
 		cc.mov(_debug_name, 123456789);
 #endif
 
-		X86Ymm x1 = cc.newYmm("x1");
-		X86Ymm x2 = cc.newYmm("x2");
-		X86Ymm y1 = cc.newYmm("y1");
-		X86Ymm y2 = cc.newYmm("y2");
-		X86Ymm a1 = cc.newYmm("a1");
-		X86Ymm a2 = cc.newYmm("a2");
-		X86Ymm d = cc.newYmm("d");
-		X86Ymm one = cc.newYmm("one");
-
+		X86Ymm one = consts.ra.newYmm("one");
 		cc.vmovaps(one, consts.simd_f_1_0);
 
 		// Setup a(x,y) = a0 + dx*x + dy*y screen space plane equation
+		X86Ymm x1 = consts.ra.newYmm("x1");
 		cc.vsubps(x1, pVtxX0, pVtxX[1]);                                           // x1 = pVtxX[0] - pVtxX[1]
+		X86Ymm x2 = consts.ra.newYmm("x2");
 		cc.vsubps(x2, pVtxX0, pVtxX[2]);                                           // x2 = pVtxX[0] - pVtxX[2]
+		X86Ymm y1 = consts.ra.newYmm("y1");
 		cc.vsubps(y1, pVtxY0, pVtxY[1]);                                           // y1 = pVtxY[0] - pVtxY[1]
+		X86Ymm y2 = consts.ra.newYmm("y2");
 		cc.vsubps(y2, pVtxY0, pVtxY[2]);                                           // y2 = pVtxY[0] - pVtxY[2]
+		X86Ymm a1 = consts.ra.newYmm("a1");
 		cc.vsubps(a1, pVtxA0, pVtxA[1]);                                           // a1 = pVtxA[0] - pVtxA[1]
+		X86Ymm a2 = consts.ra.newYmm("a2");
 		cc.vsubps(a2, pVtxA0, pVtxA[2]);                                           // a2 = pVtxA[0] - pVtxA[2]
 		
+		X86Ymm d = consts.ra.newYmm("d");
 		cc.vmulps(d, y1, x2);                                                      // d = y1 * x2
 		cc.vfmsub231ps(d, x1, y2);                                                 // d = y1 * y2 - d
 		cc.vdivps(d, one, d);                                                      // d = 1.0f / d
+		consts.ra.free(one);
 		
 		cc.vmulps(aPixelDx, y1, a2);                                               // aPixelDx = y1 * a2
+		consts.ra.free(y1);
 		cc.vfmsub231ps(aPixelDx, a1, y2);                                          // aPixelDx = a1 * y2 - aPixelDx
+		consts.ra.free(y2);
 		cc.vmulps(aPixelDx, aPixelDx, d);                                          // aPixelDx *= d
 
 		cc.vmulps(aPixelDy, a1, x2);                                               // aPixelDy = a1 * x2
+		consts.ra.free(a1);
+		consts.ra.free(x2);
 		cc.vfmsub231ps(aPixelDy, x1, a2);                                          // aPixelDy = x1 * a2 - aPixelDy
+		consts.ra.free(a2);
+		consts.ra.free(x1);
 		cc.vmulps(aPixelDy, aPixelDy, d);                                          // aPixelDy *= d
+		consts.ra.free(d);
 
-		cc.vmulps(aPixel0, aPixelDx, pVtxX0);                                      // aPixel0 = aPixelDx * pVtxX[0]
-		cc.vfmadd231ps(aPixel0, aPixelDy, pVtxY0);                                 // aPixel0 = aPixelDy * pVtxY[0] + aPixel0
-		cc.vsubps(aPixel0, pVtxA0, aPixel0);                                       // aPixel0 = pVtxA[0] - aPixel0
+		//cc.vmulps(aPixel0, aPixelDx, pVtxX0);                                      // aPixel0 = aPixelDx * pVtxX[0]
+		//cc.vfmadd231ps(aPixel0, aPixelDy, pVtxY0);                                 // aPixel0 = aPixelDy * pVtxY[0] + aPixel0
+		//cc.vsubps(aPixel0, pVtxA0, aPixel0);                                       // aPixel0 = pVtxA[0] - aPixel0
 	}
 
 	void ASM_SortVertices(
@@ -501,48 +636,55 @@ public:
 		cc.mov(_debug_name, 123456789);
 #endif
 
-		X86Ymm ey1 = cc.newYmm("ey1");
-		X86Ymm ey2 = cc.newYmm("ey2");
-		X86Ymm sX = cc.newYmm("sX");
-		X86Ymm sY = cc.newYmm("sY");
-		X86Ymm swapMask = cc.newYmm("swapMask");
-
 		X86Ymm pVtxX[3], pVtxY[3];
 		for (int i = 0; i < 3; ++i)
 		{
-			pVtxX[i] = cc.newYmm("pVtxXReg[%d]");
-			pVtxY[i] = cc.newYmm("pVtxYReg[%d]");
+			pVtxX[i] = consts.ra.newYmm("pVtxXReg[%d]");
 			cc.vmovaps(pVtxX[i], pVtxXMem[i]);
+			pVtxY[i] = consts.ra.newYmm("pVtxYReg[%d]");
 			cc.vmovaps(pVtxY[i], pVtxYMem[i]);
 		}
 
-		X86Ymm C_zerobits = cc.newYmm("C_zerobits");
-		cc.vpxor(C_zerobits, C_zerobits, C_zerobits);
+		X86Ymm C_zerobits = consts.ra.newYmm("ASM_SortVertices::C_zerobits");
+		cc.vpxor(C_zerobits, x86::ymm0, x86::ymm0);                                // amjit bug workaround: cc.vpxor(C_zerobits, C_zerobits, C_zerobits) breaks register allocator
 
 		// Rotate the triangle in the winding order until v0 is the vertex with lowest Y value
 		for (int i = 0; i < 2; i++)
 		{
+			X86Ymm ey1 = consts.ra.newYmm("ey1");
+			X86Ymm ey2 = consts.ra.newYmm("ey2");
 			cc.vsubps(ey1, pVtxY[1], pVtxY[0]);                                    // ey1 = pVtxY[1] - pVtxY[0]
 			cc.vsubps(ey2, pVtxY[2], pVtxY[0]);                                    // ey2 = pVtxY[2] - pVtxY[0]
+			X86Ymm swapMask = consts.ra.newYmm("swapMask");
 			cc.vpcmpeqd(swapMask, ey2, C_zerobits);                                // swapMask = ey == 0 ? ~0 : 0
 			cc.vpor(swapMask, swapMask, ey1);                                      // swapMask |= ey1
 			cc.vpor(swapMask, swapMask, ey2);                                      // swapMask |= ey2
+			consts.ra.free(ey1);
+			consts.ra.free(ey2);
 
+			X86Ymm sX = consts.ra.newYmm("sX");
 			cc.vblendvps(sX, pVtxX[2], pVtxX[0], swapMask);                        // sX = blendv_ps(pVtxX[2], pVtxX[0], swapMask)
 			cc.vblendvps(pVtxX[0], pVtxX[0], pVtxX[1], swapMask);                  // pVtxX[0] = blendv_ps(pVtxX[0], pVtxX[1], swapMask)
 			cc.vblendvps(pVtxX[1], pVtxX[1], pVtxX[2], swapMask);                  // pVtxX[1] = blendv_ps(pVtxX[1], pVtxX[2], swapMask)
 			cc.vmovaps(pVtxX[2], sX);                                              // pVtxX[2] = sX
+			consts.ra.free(sX);
 
+			X86Ymm sY = consts.ra.newYmm("sY");
 			cc.vblendvps(sY, pVtxY[2], pVtxY[0], swapMask);                        // sY = blendv_ps(pVtxY[2], pVtxY[0], swapMask)
 			cc.vblendvps(pVtxY[0], pVtxY[0], pVtxY[1], swapMask);                  // pVtxY[0] = blendv_ps(pVtxY[0], pVtxY[1], swapMask)
 			cc.vblendvps(pVtxY[1], pVtxY[1], pVtxY[2], swapMask);                  // pVtxY[1] = blendv_ps(pVtxY[1], pVtxY[2], swapMask)
+			consts.ra.free(swapMask);
 			cc.vmovaps(pVtxY[2], sX);                                              // pVtxY[2] = sY
+			consts.ra.free(sY);
 		}
+		consts.ra.free(C_zerobits);
 
 		for (int i = 0; i < 3; ++i)
 		{
 			cc.vmovaps(pVtxXMem[i], pVtxX[i]);
+			consts.ra.free(pVtxX[i]);
 			cc.vmovaps(pVtxYMem[i], pVtxY[i]);
+			consts.ra.free(pVtxY[i]);
 		}
 	}
 
@@ -556,22 +698,14 @@ public:
 		const X86Gp &tileAddr,
 		X86Ymm *left,
 		X86Ymm *right,
-		const X86Ymm &zTriMin,
-		const X86Ymm &zTriMax,
+		const X86Mem &zTriMin,
+		const X86Mem &zTriMax,
 		const X86Ymm &z0)
 	{
 #ifdef _DEBUG
 		X86Gp _debug_name = cc.newU32("ASM_TraverseTile");
 		cc.mov(_debug_name, 123456789);
 #endif
-
-		// Registers
-		X86Ymm zMinBuf = cc.newYmm("zMinBuf");
-		X86Ymm zDistTriMin = cc.newYmm("zDistTriMin");
-		X86Ymm rastMask32x1 = cc.newYmm("rastMask32x1");
-		X86Ymm rastMask8x4 = cc.newYmm("rastMask8x4");
-		X86Ymm tmpReg = cc.newYmm();
-		X86Gp  zDistMask = cc.newI32("zDistMask");
 
 		// Labels
 		Label L_TileCompleted = cc.newLabel();
@@ -584,37 +718,50 @@ public:
 		// Perform a coarse test to quickly discard occluded tiles
 #if QUICK_MASK != 0
 		// Only use the reference layer (layer 0) to cull as it is always conservative
+		X86Ymm zMinBuf = consts.ra.newYmm("zMinBuf");
 		cc.vmovaps(zMinBuf, x86::yword_ptr(tileAddr, offsetof(ZTile, mZMin[0])));               // zMinBuf = mMaskedHiZBuffer[tileIdx].mZMin[0]
 #else
 		// TODO
 #endif
 
-		X86Ymm C_zerobits = cc.newYmm("C_zerobits");
-		X86Ymm C_onebits = cc.newYmm("C_onebits");
+		X86Ymm C_zerobits = consts.ra.newYmm("ASM_TraverseTile::C_zerobits");
+		cc.vpxor(C_zerobits, x86::ymm0, x86::ymm0);                                             // amjit bug workaround: cc.vpxor(C_zerobits, C_zerobits, C_zerobits) breaks register allocator
+		X86Ymm C_onebits = consts.ra.newYmm("ASM_TraverseTile::C_onebits");
+		cc.vpcmpeqd(C_onebits, x86::ymm0, x86::ymm0);                                           // amjit bug workaround: cc.vpcmpeqd(C_onebits, C_onebits, C_onebits) breaks register allocator
 
-		cc.vpxor(C_zerobits, C_zerobits, C_zerobits);
-		cc.vpcmpeqd(C_onebits, C_onebits, C_onebits);
-
-		cc.vsubps(zDistTriMin, zTriMax, zMinBuf);                                               // zDistTriMin = zTriMax - zMinBuf
+		X86Ymm zDistTriMin = consts.ra.newYmm("zDistTriMin");
+		cc.vsubps(zDistTriMin, zMinBuf, zTriMax);                                               // zDistTriMin = zTriMax - zMinBuf
+		if (!TEST_Z) 
+			consts.ra.free(zMinBuf);
+		X86Gp zDistMask = consts.ra.newI32("zDistMask");
 		cc.vmovmskps(zDistMask, zDistTriMin);                                                   // zDistMask = movemask_ps(zDistTriMin)
-		cc.cmp(zDistMask, SIMD_ALL_LANES_MASK);                                                 // if (zDistMask)
-		cc.jne(L_TileCompleted);                                                                // {
+		consts.ra.free(zDistTriMin);
+		cc.cmp(zDistMask, 0);                                                                   // if (zDistMask)
+		consts.ra.free(zDistMask);
+		cc.je(L_TileCompleted);                                                                 // {
 		{
 			// Compute coverage mask for entire 32xN using shift operations
+			X86Ymm rastMask32x1 = consts.ra.newYmm("rastMask32x1");
 			cc.vpsllvd(rastMask32x1, C_onebits, left[0]);                                       // rastMask32x1 = ~0 >> left[0]
 			for (int i = 1; i < nLeftEvents; ++i)
 			{
+				X86Ymm tmpReg = consts.ra.newYmm("tmpReg");
 				cc.vpsllvd(tmpReg, C_onebits, left[i]);                                         // tmpReg = ~0 >> left[i]
-				cc.vpandd(rastMask32x1, rastMask32x1, tmpReg);                                  // rastMask32x1 &= tmpReg
+				cc.vpand(rastMask32x1, rastMask32x1, tmpReg);                                   // rastMask32x1 &= tmpReg
+				consts.ra.free(tmpReg);
 			}
 			for (int i = 0; i < nRightEvents; ++i)
 			{
+				X86Ymm tmpReg = consts.ra.newYmm("tmpReg");
 				cc.vpsllvd(tmpReg, C_onebits, right[i]);                                        // tmpReg = ~0 >> right[i]
 				cc.vpandn(rastMask32x1, tmpReg, rastMask32x1);                                  // rastMask32x1 = ~tmpReg & rastMask32x1
+				consts.ra.free(tmpReg);
 			}
 			
 			// Swizzle rasterization mask to 8x4 subtiles
+			X86Ymm rastMask8x4 = consts.ra.newYmm("rastMask8x4");
 			cc.vpshufb(rastMask8x4, rastMask32x1, consts.simd_i_shuffle_scanlines_to_subtiles); // rastMask8x4 = shuffle_epi8(rastMask32x1, shuffleScanlinesToSubtiles)
+			consts.ra.free(rastMask32x1);
 
 			// Perform conservative texture lookup for alpha tested triangles
 			//if (TEXTURE_COORDINATES)
@@ -622,38 +769,47 @@ public:
 
 			if (TEST_Z) // TestTriangles
 			{
-				// Registers
-				X86Ymm zSubtileMax = cc.newYmm("zSubtileMax");
-				X86Ymm zPass = cc.newYmm("zPass");
-				X86Ymm deadLane = cc.newYmm("deadLane");
-
+				
+				X86Ymm deadLane = consts.ra.newYmm("deadLane");
 				cc.vpcmpeqd(deadLane, rastMask8x4, C_zerobits);                                 // deadLane = rastMask8x4 == 0 ? ~0 : 0
+				consts.ra.free(rastMask8x4);
+				X86Ymm zSubtileMax = consts.ra.newYmm("zSubtileMax");
 				cc.vminps(zSubtileMax, z0, zTriMax);                                            // zSubtileMax = min(z0, zTriMax)
+				X86Ymm zPass = consts.ra.newYmm("zPass");
 				cc.vcmpps(zPass, zSubtileMax, zMinBuf, _CMP_GE_OQ);                             // zPass = zSubtileMax >= zMinBuf ? ~0 : 0
+				consts.ra.free(zSubtileMax);
+				consts.ra.free(zMinBuf);
 				cc.vpandn(zPass, deadLane, zPass);                                              // zPass = ~deadLane & zPass
-				//#if QUERY_DEBUG_BUFFER != 0
+				consts.ra.free(deadLane);
+#if QUERY_DEBUG_BUFFER != 0
 				//	__mwi debugVal = _mmw_blendv_epi32(_mmw_set1_epi32(0), _mmw_blendv_epi32(_mmw_set1_epi32(1), _mmw_set1_epi32(2), zPass), _mmw_not_epi32(deadLane));
 				//	mQueryDebugBuffer[tileIdx] = debugVal;
-				//#endif
+#endif
 				cc.vptest(zPass, zPass);                                                        // if (zPass != 0)
 				cc.jnz(L_VisibleExit);                                                          //     goto L_VisibleExit
+				consts.ra.free(zPass);
 
 			}
 			else // RenderTriangles
 			{
 				// Compute zmin for rasterized triangle in the current tile
-				X86Ymm zTriSubtile = cc.newYmm("zTriSubtile");
+				X86Ymm zTriSubtile = consts.ra.newYmm("zTriSubtile");
 				cc.vmaxps(zTriSubtile, z0, zTriMin);                                            // zTriSubtile = max(z0, zTriMin)
 
 				// Perform update heuristic
 #if QUICK_MASK != 0
-				ASM_UpdateTileQuick(cc, consts, tileAddr, rastMask8x4, zTriSubtile);
+				ASM_UpdateTileQuick(cc, consts, C_zerobits, C_onebits, tileAddr, rastMask8x4, zTriSubtile);
 #else
 				ASM_UpdateTileAccurate(cc, consts, tileAddr, rastMask8x4, zTriSubtile);
 #endif
+				consts.ra.free(zTriSubtile);
+				consts.ra.free(rastMask8x4);
 			}
 		}
 		cc.bind(L_TileCompleted);                                                               // }
+
+		consts.ra.free(C_zerobits);
+		consts.ra.free(C_onebits);
 	}
 
 	void ASM_TraverseScanline(
@@ -669,40 +825,34 @@ public:
 		const X86Gp &rightOffset, 
 		const X86Gp &tileRowAddr,
 		const X86Ymm *events,
-		const X86Ymm &zTriMin, 
-		const X86Ymm &zTriMax, 
+		const X86Mem &zTriMin, 
+		const X86Mem &zTriMax, 
 		const X86Ymm &z0, 
-		const X86Ymm &zTileDx)
+		const X86Mem &zTileDx)
 	{
 #ifdef _DEBUG
 		X86Gp _debug_name = cc.newU32("ASM_TraverseScanline");
 		cc.mov(_debug_name, 123456789);
 #endif
-
-		// Registers
-		X86Ymm vLeftOffsetZ0 = cc.newYmm("vLeftOffset/z0");
-		X86Ymm eventOffset = cc.newYmm("eventOffset");
-		X86Ymm right[2], left[2];
-		X86Gp tileAddr = cc.newU64("tileAddr");
-		X86Gp tileAddrEnd = cc.newU64("tileAddrEnd");
-
 		Label L_ScanlineLoopStart = cc.newLabel();
 		Label L_ScanlineLoopExit = cc.newLabel();
 
-		X86Ymm C_zerobits = cc.newYmm("C_zerobits");
-
-		cc.vpxor(C_zerobits, C_zerobits, C_zerobits);
-
 		// Floor edge events to integer pixel coordinates (shift out fixed point bits)
+		X86Ymm vLeftOffsetZ0 = consts.ra.newYmm("vLeftOffset/z0");
 		if (leftOffset != nullptr)
 			ASM_set1(cc, vLeftOffsetZ0, *leftOffset);
 		else
 			cc.vxorps(vLeftOffsetZ0, vLeftOffsetZ0, vLeftOffsetZ0);                    // vLeftOffset = 0
+		X86Ymm eventOffset = consts.ra.newYmm("eventOffset");
 		cc.vpslld(eventOffset, eventOffset, TILE_WIDTH_SHIFT);                         // eventOffset = vLeftOffset >> TILE_WIDTH_SHIFT
 
+		X86Ymm C_zerobits = consts.ra.newYmm("ASM_TraverseScanline::C_zerobits");
+		cc.vpxor(C_zerobits, x86::ymm0, x86::ymm0);                                    // amjit bug workaround: cc.vpxor(C_zerobits, C_zerobits, C_zerobits) breaks register allocator
+
+		X86Ymm right[2], left[2];
 		for (int i = 0; i < nLeftEvents; ++i)
 		{
-			left[i] = cc.newYmm("left[%d]", i);
+			left[i] = consts.ra.newYmm("left[%d]");
 			cc.vpsrad(left[i], events[leftEvent - i], FP_BITS);                        // left[i] = events[leftEvent-i] >> FP_BITS
 			cc.vpsubd(left[i], left[i], eventOffset);                                  // left[i] -= eventOffset
 			cc.vpmaxsd(left[i], left[i], C_zerobits);                                  // left[i] = max(left[i], 0)
@@ -710,30 +860,36 @@ public:
 
 		for (int i = 0; i < nRightEvents; ++i)
 		{
-			right[i] = cc.newYmm("right[%d]", i);
+			right[i] = consts.ra.newYmm("right[%d]");
 			cc.vpsrad(right[i], events[rightEvent + i], FP_BITS);                      // right[i] = events[rightEvent+i] >> FP_BITS
 			cc.vpsubd(right[i], right[i], eventOffset);                                // right[i] -= eventOffset
 			cc.vpmaxsd(right[i], right[i], C_zerobits           );                     // right[i] = max(right[i], 0)
 		}
+		consts.ra.free(C_zerobits);
+		consts.ra.free(eventOffset);
 
 		cc.vcvtdq2ps(vLeftOffsetZ0, vLeftOffsetZ0);                                    // vLeftOffsetZ0 = cvtepi32_ps(leftOffset);
-		cc.vfmadd132ps(vLeftOffsetZ0, zTileDx, z0);                                    // z0 = zTileDx*leftOffset + z0
+		cc.vfmadd132ps(vLeftOffsetZ0, z0, zTileDx);                                    // z0 = zTileDx*leftOffset + z0
 
 		// tileAddr = mMaskedHiZBuffer + sizeof(HiZTile)*(iLeftOffset + iTileIdx)
+		X86Gp tileAddr = consts.ra.newI64("tileAddr");
 		if (leftOffset != nullptr)
 		{
-			X86Gp offset = cc.newI64();
+			X86Gp offset = consts.ra.newI64("offset");
 			cc.lea(offset, X86Mem(*leftOffset, *leftOffset, 1, 0));                     // offset = leftOffset * 3
 			cc.shl(offset, (TILE_HEIGHT_SHIFT + 2));                                    // offset *= sizeof(__mw)
+			consts.ra.free(offset);
 			cc.lea(tileAddr, X86Mem(tileRowAddr, offset, 0, 0));                        // tileAddr = iTileRowAddr + offset
 		}
 		else
 			cc.mov(tileAddr, tileRowAddr);                                              // tileAddr = tileRowAddr
 
 		// tileAddrEnd = mMaskedHiZBuffer + sizeof(HiZTile)*(iRightOffset + iTileIdx)
-		X86Gp offset = cc.newI64();
+		X86Gp offset = consts.ra.newI64("offset");
 		cc.lea(offset, X86Mem(rightOffset, rightOffset, 1, 0));                         // offset = rightOffset * 3
 		cc.shl(offset, (TILE_HEIGHT_SHIFT + 2));                                        // offset *= sizeof(__mw)
+		consts.ra.free(offset);
+		X86Gp tileAddrEnd = consts.ra.newI64("tileAddrEnd");
 		cc.lea(tileAddrEnd, X86Mem(tileRowAddr, offset, 0, 0));                         // tileAddrEnd = tileRowAddr + offset
 
 		// Traverse first tile (must alawys be >= 1 tiles)
@@ -759,6 +915,13 @@ public:
 			cc.jmp(L_ScanlineLoopStart);
 		}
 		cc.bind(L_ScanlineLoopExit);                                                   // }
+		for (int i = 0; i < nLeftEvents; ++i)
+			consts.ra.free(left[i]);
+		for (int i = 0; i < nRightEvents; ++i)
+			consts.ra.free(right[i]);
+		consts.ra.free(tileAddr);
+		consts.ra.free(tileAddrEnd);
+		consts.ra.free(vLeftOffsetZ0);
 	}
 
 	void ASM_RasterizeTriangleSegment(
@@ -776,12 +939,12 @@ public:
 		X86Gp *tileEvent,
 		const X86Gp *tileEventDelta,
 		X86Ymm *triEvent,
-		const X86Ymm *triSlopeTileDelta,
-		const X86Ymm &zTriMin,
-		const X86Ymm &zTriMax,
+		const X86Mem *triSlopeTileDelta,
+		const X86Mem &zTriMin,
+		const X86Mem &zTriMax,
 		X86Ymm &z0,
-		const X86Ymm &zTileDx,
-		const X86Ymm &zTileDy)
+		const X86Mem &zTileDx,
+		const X86Mem &zTileDy)
 	{
 #ifdef _DEBUG
 		X86Gp _debug_name = cc.newU32("ASM_RasterizeTriangleSegment");
@@ -798,20 +961,27 @@ public:
 		{
 			if (TIGHT_TRAVERSAL)
 			{
-				X86Gp start = cc.newI32("start"), end = cc.newI32("end"), bbWidth_1 = cc.newI32("bbWidth_1"), zeroTmp = cc.newI32("zeroTmp");
-
-				cc.lea(bbWidth_1, X86Mem(bbWidth, -1));
-				cc.mov(zeroTmp, 0);
 
 				// start = max(0, min(bbWidth - 1, tileEvent[leftEvent] >> (TILE_WIDTH_SHIFT + FP_BITS)));
+				X86Gp start = consts.ra.newI32("start");
+				X86Gp bbWidth_1 = consts.ra.newI32("bbWidth_1");
+				X86Gp zeroTmp = consts.ra.newI32("zeroTmp");
+
+				cc.lea(bbWidth_1, X86Mem(bbWidth, -1));
+				cc.xor_(zeroTmp, zeroTmp);
+
 				cc.mov(start, tileEvent[leftEvent]);
 				cc.shr(start, (TILE_WIDTH_SHIFT + FP_BITS));                           // start = tileEvent[leftEvent] >> (TILE_WIDTH_SHIFT + FP_BITS)
 				cc.cmp(start, bbWidth_1);
 				cc.cmovg(start, bbWidth_1);                                            // start = min(start, bbWidth - 1)
 				cc.cmp(start, 0);
 				cc.cmovl(start, zeroTmp);                                              // start = max(start, 0)
+				consts.ra.free(zeroTmp);
+				consts.ra.free(bbWidth_1);
 
 				// end = min(bbWidth, ((int)tileEvent[rightEvent] >> (TILE_WIDTH_SHIFT + FP_BITS)));
+				X86Gp end = consts.ra.newI32("end");
+				
 				cc.mov(end, tileEvent[rightEvent]);
 				cc.sar(end, TILE_WIDTH_SHIFT + FP_BITS);                               // end = tileEvent[rightEvent] >> (TILE_WIDTH_SHIFT + FP_BITS)
 				cc.cmp(end, bbWidth);
@@ -819,6 +989,9 @@ public:
 
 				// Traverse the scanline and update the masked hierarchical z buffer
 				ASM_TraverseScanline(cc, TEST_Z, leftEvent, rightEvent, 1, 1, L_VisibleExit, consts, &start, end, tileRowAddr, triEvent, zTriMin, zTriMax, z0, zTileDx);
+				
+				consts.ra.free(end);
+				consts.ra.free(start);
 			}
 			else
 			{
@@ -827,7 +1000,7 @@ public:
 			}
 			
 			// move to the next scanline of tiles, update edge events and interpolate z
-			cc.add(tileRowAddr, consts.i64_res_tiles_width);                          // tileRowIdx += mTilesWidth;
+			cc.add(tileRowAddr, consts.i64_scanline_step);                          // tileRowIdx += mTilesWidth;
 			
 			if (!UPDATE_EVENTS_LAST_ITERATION)
 			{
@@ -878,19 +1051,16 @@ public:
 		//X86Ymm *slopeSign, 
 		//X86Ymm *eventStartRemainder, 
 		//X86Ymm *slopeTileRemainder,
-		const X86Ymm &zTriMin, 
-		const X86Ymm &zTriMax, 
+		const X86Mem &zTriMin, 
+		const X86Mem &zTriMax, 
 		X86Ymm &z0, 
-		const X86Ymm &zTileDx, 
-		const X86Ymm &zTileDy)
+		const X86Mem &zTileDx, 
+		const X86Mem &zTileDy)
 	{
 #ifdef _DEBUG
 		X86Gp _debug_name = cc.newU32("ASM_RasterizeTriangle");
 		cc.mov(_debug_name, 123456789);
 #endif
-
-		// Registers
-		X86Gp tmp0i32 = cc.newI32();
 
 		Label L_FlatTriangle = cc.newLabel(), L_TriangleExit = cc.newLabel();
 
@@ -901,24 +1071,27 @@ public:
 
 #if PRECISE_COVERAGE != 0
 #else
-		X86Ymm triSlopeTileDelta[3] = { cc.newYmm("triSlopeTileDelta[0]"), cc.newYmm("triSlopeTileDelta[1]"), cc.newYmm("triSlopeTileDelta[2]") };
-		X86Ymm triEvent[3] = { cc.newYmm("triEvent[0]"), cc.newYmm("triEvent[1]"), cc.newYmm("triEvent[2]") };
+		X86Ymm triEvent[3];
+		X86Mem Mem_triSlopeTileDelta[3] = { cc.newStack(sizeof(__mw), sizeof(__mw), "triSlopeTileDelta[0]"), cc.newStack(sizeof(__mw), sizeof(__mw), "triSlopeTileDelta[1]"), cc.newStack(sizeof(__mw), sizeof(__mw), "triSlopeTileDelta[2]") };
 		for (int i = 0; i < 3; ++i)
 		{
-			X86Ymm tmpYmm = cc.newYmm();
-
 			// Get deltas used to increment edge events each time we traverse one scanline of tiles
-			ASM_set1(cc, triSlopeTileDelta[i], slopeTileDelta[i]);                                        // triSlopeTileDelta[i] = _mmw_set1_epi32(slopeTileDelta[i].m_i32[triIdx]);
+			X86Ymm triSlopeTileDelta = consts.ra.newYmm("triSlopeTileDelta");
+			ASM_set1(cc, triSlopeTileDelta, slopeTileDelta[i]);                                           // triSlopeTileDelta = _mmw_set1_epi32(slopeTileDelta[i].m_i32[triIdx]);
+			cc.vmovaps(Mem_triSlopeTileDelta[i], triSlopeTileDelta);                                      // constant per triangle, so spill to stack
+			consts.ra.free(triSlopeTileDelta);
 
 			// Setup edge events for first batch of SIMD_LANES scanlines
-			ASM_set1(cc, tmpYmm, eventStart[i]);                                                          // tmpYmm = _mmw_set1_epi32(eventStart[i].m_i32[triIdx])
+			X86Ymm eStart = consts.ra.newYmm("eStart");
+			ASM_set1(cc, eStart, eventStart[i]);                                                          // eStart = _mmw_set1_epi32(eventStart[i].m_i32[triIdx])
+			triEvent[i] = consts.ra.newYmm("triEvent[%d]");
 			ASM_set1(cc, triEvent[i], slope[i]);                                                          // triEvent[i] = _mmw_set1_epi32(slope[i].m_i32[triIdx])
 			cc.vpmulld(triEvent[i], triEvent[i], consts.simd_i_lane_idx);                                 // triEvent[i] *= SIMD_LANE_IDX
-			cc.vpaddd(triEvent[i], triEvent[i], tmpYmm);                                                  // triEvent[i] += tmpYmm
+			cc.vpaddd(triEvent[i], triEvent[i], eStart);                                                  // triEvent[i] += eStart
+			consts.ra.free(eStart);
 		}
 #endif
-		X86Gp tileEventDelta[3] = { cc.newI32("tileEventDelta[0]"), cc.newI32("tileEventDelta[1]"), cc.newI32("tileEventDelta[2]") };
-		X86Gp tileEvent[3] = { cc.newI32("tileEvent[0]"), cc.newI32("tileEvent[1]"), cc.newI32("tileEvent[2]") };
+		X86Gp tileEventDelta[3], tileEvent[3];
 
 		// For big triangles track start & end tile for each scanline and only traverse the valid region
 		if (TIGHT_TRAVERSAL)
@@ -926,14 +1099,17 @@ public:
 			for (int i = 0; i < 3; ++i)
 			{
 				bool rightEdge = i == 0 || (i == 1 && MID_VTX_RIGHT);
+				tileEventDelta[i] = consts.ra.newI32("tileEventDelta[%d]");
 				cc.mov(tileEventDelta[i], slopeTileDelta[i]);                                            // tileEventDelta[i] = slopeTileDelta[i].m_i32[triIdx]
 #if PRECISE_COVERAGE != 0
-				cc.add(tileEventDelta[0], rightEdge ? 1 : -1);
+				cc.add(tileEventDelta[i], rightEdge ? 1 : -1);
 #endif
 
+				tileEvent[i] = consts.ra.newI32("tileEvent[%d]");
 				cc.mov(tileEvent[i], eventStart[i]);                                                     // tileEvent[i] = eventStart[i].m_i32[triIdx]
 				
-				cc.mov(tmp0i32, 0);
+				X86Gp tmp0i32 = consts.ra.newI32("tmp0i32");
+				cc.xor_(tmp0i32, tmp0i32);
 				cc.cmp(tileEvent[i], 0);
 				if (rightEdge)
 				{
@@ -945,6 +1121,7 @@ public:
 					cc.cmovle(tmp0i32, tileEventDelta[i]);                                                // tmp0i32 = min(0, tileEventDelta[i])
 				}
 				cc.add(tileEvent[i], tmp0i32);                                                            // tileEvent[i] += tmp0i32
+				consts.ra.free(tmp0i32);
 
 			}
 		}
@@ -952,15 +1129,14 @@ public:
 		cc.cmp(tileRowAddr, tileMidRowAddr);                                                              // if (tileRowIdx > tileMidRowIdx)
 		cc.jg(L_FlatTriangle);                                                                            //      goto L_FlatTriangle
 		{
-			// Registers
-			X86Gp tileStopAddr = cc.newI64("tileStopIdx");
-			
+			X86Gp tileStopAddr = consts.ra.newI64("tileStopIdx");	
 			cc.mov(tileStopAddr, tileEndRowAddr);
 			cc.cmp(tileMidRowAddr, tileEndRowAddr);
 			cc.cmovle(tileStopAddr, tileMidRowAddr);                                                       // tileStopAddr = min(tileEndRowIdx, tileMidRowIdx)
 			
 			// Traverse bottom triangle segment
-			ASM_RasterizeTriangleSegment(cc, TEST_Z, TIGHT_TRAVERSAL, 1, 2, 0, L_VisibleExit, consts, tileRowAddr, tileStopAddr, bbWidth, tileEvent, tileEventDelta, triEvent, triSlopeTileDelta, zTriMin, zTriMax, z0, zTileDx, zTileDy);
+			ASM_RasterizeTriangleSegment(cc, TEST_Z, TIGHT_TRAVERSAL, 1, 2, 0, L_VisibleExit, consts, tileRowAddr, tileStopAddr, bbWidth, tileEvent, tileEventDelta, triEvent, Mem_triSlopeTileDelta, zTriMin, zTriMax, z0, zTileDx, zTileDy);
+			consts.ra.free(tileStopAddr);
 
 			// Traverse middle scanline
 			cc.cmp(tileRowAddr, tileEndRowAddr);                                                          // if (tileRowAddr >= tileEndRowAddr)
@@ -968,20 +1144,25 @@ public:
 			{
 				if (TIGHT_TRAVERSAL)
 				{
-					X86Gp start = cc.newI32("start"), end = cc.newI32("end"), bbWidth_1 = cc.newI32("bbWidth_1"), zeroTmp = cc.newI32("zeroTmp");
+					// start = max(0, min(bbWidth - 1, tileEvent[2] >> (TILE_WIDTH_SHIFT + FP_BITS)));
+					X86Gp start = consts.ra.newI32("start");
+					X86Gp bbWidth_1 = consts.ra.newI32("bbWidth_1");
+					X86Gp zeroTmp = consts.ra.newI32("zeroTmp");
 
 					cc.lea(bbWidth_1, X86Mem(bbWidth, -1));
-					cc.mov(zeroTmp, 0);
+					cc.xor_(zeroTmp, zeroTmp);
 
-					// start = max(0, min(bbWidth - 1, tileEvent[2] >> (TILE_WIDTH_SHIFT + FP_BITS)));
 					cc.mov(start, tileEvent[2]);
 					cc.shr(start, (TILE_WIDTH_SHIFT + FP_BITS));                                          // start = tileEvent[2] >> (TILE_WIDTH_SHIFT + FP_BITS)
 					cc.cmp(start, bbWidth_1);
 					cc.cmovg(start, bbWidth_1);                                                           // start = min(start, bbWidth - 1)
+					consts.ra.free(bbWidth_1);
 					cc.cmp(start, 0);
 					cc.cmovl(start, zeroTmp);                                                             // start = max(start, 0)
+					consts.ra.free(zeroTmp);
 
 					// end = min(bbWidth, ((int)endEvent >> (TILE_WIDTH_SHIFT + FP_BITS)));
+					X86Gp end = consts.ra.newI32("end");
 					cc.mov(end, tileEvent[0]);
 					cc.sar(end, TILE_WIDTH_SHIFT + FP_BITS);                                              // end = tileEvent[0] >> (TILE_WIDTH_SHIFT + FP_BITS)
 					cc.cmp(end, bbWidth);
@@ -992,6 +1173,8 @@ public:
 						ASM_TraverseScanline(cc, TEST_Z, 2, 0, 1, 2, L_VisibleExit, consts, &start, end, tileRowAddr, triEvent, zTriMin, zTriMax, z0, zTileDx);
 					else
 						ASM_TraverseScanline(cc, TEST_Z, 2, 0, 2, 1, L_VisibleExit, consts, &start, end, tileRowAddr, triEvent, zTriMin, zTriMax, z0, zTileDx);
+					consts.ra.free(start);
+					consts.ra.free(end);
 				}
 				else
 				{
@@ -1003,7 +1186,7 @@ public:
 				}
 
 				// move to the next scanline of tiles, update edge events and interpolate z
-				cc.add(tileRowAddr, consts.i64_res_tiles_width);                                          // tileRowAddr += mTilesWidth;
+				cc.add(tileRowAddr, consts.i64_scanline_step);                                          // tileRowAddr += mTilesWidth;
 			}
 
 			// Traverse top segment
@@ -1014,8 +1197,8 @@ public:
 				cc.vaddps(z0, z0, zTileDy);                                                               // z0 += tileY
 #if PRECISE_COVERAGE != 0
 #else
-				cc.vpaddd(triEvent[MID_VTX_RIGHT + 1], triEvent[MID_VTX_RIGHT + 1], triSlopeTileDelta[MID_VTX_RIGHT + 1]);
-				cc.vpaddd(triEvent[MID_VTX_RIGHT + 0], triEvent[MID_VTX_RIGHT + 0], triSlopeTileDelta[MID_VTX_RIGHT + 0]);
+				cc.vpaddd(triEvent[MID_VTX_RIGHT + 1], triEvent[MID_VTX_RIGHT + 1], Mem_triSlopeTileDelta[MID_VTX_RIGHT + 1]);
+				cc.vpaddd(triEvent[MID_VTX_RIGHT + 0], triEvent[MID_VTX_RIGHT + 0], Mem_triSlopeTileDelta[MID_VTX_RIGHT + 0]);
 #endif
 				if (TIGHT_TRAVERSAL)
 				{
@@ -1024,7 +1207,7 @@ public:
 				}
 
 				// Traverse top triangle segment
-				ASM_RasterizeTriangleSegment(cc, TEST_Z, TIGHT_TRAVERSAL, 0, MID_VTX_RIGHT + 1, MID_VTX_RIGHT + 0, L_VisibleExit, consts, tileRowAddr, tileEndRowAddr, bbWidth, tileEvent, tileEventDelta, triEvent, triSlopeTileDelta, zTriMin, zTriMax, z0, zTileDx, zTileDy);
+				ASM_RasterizeTriangleSegment(cc, TEST_Z, TIGHT_TRAVERSAL, 0, MID_VTX_RIGHT + 1, MID_VTX_RIGHT + 0, L_VisibleExit, consts, tileRowAddr, tileEndRowAddr, bbWidth, tileEvent, tileEventDelta, triEvent, Mem_triSlopeTileDelta, zTriMin, zTriMax, z0, zTileDx, zTileDy);
 			}
 
 			cc.jmp(L_TriangleExit);                                                                       // }
@@ -1035,10 +1218,20 @@ public:
 			cc.jg(L_TriangleExit);                                                                        // {
 			{
 				// Traverse top triangle segment
-				ASM_RasterizeTriangleSegment(cc, TEST_Z, TIGHT_TRAVERSAL, 0, MID_VTX_RIGHT + 1, MID_VTX_RIGHT + 0, L_VisibleExit, consts, tileRowAddr, tileEndRowAddr, bbWidth, tileEvent, tileEventDelta, triEvent, triSlopeTileDelta, zTriMin, zTriMax, z0, zTileDx, zTileDy);
+				ASM_RasterizeTriangleSegment(cc, TEST_Z, TIGHT_TRAVERSAL, 0, MID_VTX_RIGHT + 1, MID_VTX_RIGHT + 0, L_VisibleExit, consts, tileRowAddr, tileEndRowAddr, bbWidth, tileEvent, tileEventDelta, triEvent, Mem_triSlopeTileDelta, zTriMin, zTriMax, z0, zTileDx, zTileDy);
 			}                                                                                             // }
 		}
 		cc.bind(L_TriangleExit);                                                                          // }
+		
+		for (int i = 0; i < 3; ++i)
+		{
+			consts.ra.free(triEvent[i]);
+			if (TIGHT_TRAVERSAL)
+			{
+				consts.ra.free(tileEvent[i]);
+				consts.ra.free(tileEventDelta[i]);
+			}
+		}
 	}
 
 	void ASM_RasterizeTriangleBatch(
@@ -1057,6 +1250,7 @@ public:
 	{
 		Label L_VisibleExit = cc.newLabel();
 		Label L_ViewCulledExit = cc.newLabel();
+		Label L_Exit = cc.newLabel();
 
 		Label L_TriLoopStart = cc.newLabel();
 		Label L_SmallTriangle = cc.newLabel();
@@ -1079,14 +1273,19 @@ public:
 		X86Mem Mem_bbTopIdx = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_bbTopIdx");
 
 		X86Mem Mem_eventStart[3];
-		X86Mem Mem_slope[3];
+		X86Mem Mem_slopeFP[3];
 		X86Mem Mem_slopeTileDelta[3];
 		for (int i = 0; i < 3; ++i)
 		{
 			Mem_eventStart[i] = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_eventStart[i]");
-			Mem_slope[i] = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_slope[i]");
+			Mem_slopeFP[i] = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_slopeFP[i]");
 			Mem_slopeTileDelta[i] = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_slopeTileDelta[i]");
 		}
+
+		X86Mem Mem_zTriMin = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_zTriMin");
+		X86Mem Mem_zTriMax = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_zTriMax");
+		X86Mem Mem_zTriTileDx = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_zTriTileDx");
+		X86Mem Mem_zTriTileDy = cc.newStack(sizeof(__mw), sizeof(__mw), "Mem_zTriTileDy");
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Set up run-time constants
@@ -1094,30 +1293,38 @@ public:
 
 		{
 			// Set up i_res_tiles_width
-			X86Gp i64_tiles_width = cc.newI64("i64_tiles_width");
-			cc.mov(i64_tiles_width, 0);
+			X86Gp i64_tiles_width = consts.ra.newI64("i64_tiles_width"); 
+			X86Gp i64_scanline_step = consts.ra.newI64("i64_scanline_step");
+			cc.xor_(i64_tiles_width, i64_tiles_width);
 			cc.mov(i64_tiles_width.r32(), x86::dword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mTilesWidth)));
-			cc.mov(consts.i64_res_tiles_width, i64_tiles_width);
+			cc.mov(i64_scanline_step, i64_tiles_width);
+			cc.imul(i64_scanline_step, sizeof(ZTile));
+			cc.mov(consts.i64_scanline_step, i64_scanline_step);
+			consts.ra.free(i64_scanline_step);
 
 			// Set up buffer pointer
-			X86Gp i64_msoc_buffer_ptr = cc.newI64("i64_msoc_buffer_ptr");
+			X86Gp i64_msoc_buffer_ptr = consts.ra.newI64("i64_msoc_buffer_ptr");
 			cc.mov(i64_msoc_buffer_ptr, x86::qword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mMaskedHiZBuffer)));
 			cc.mov(consts.i64_msoc_buffer_ptr, i64_msoc_buffer_ptr);
+			consts.ra.free(i64_msoc_buffer_ptr);
 
 			// Set up simd_i_res_tiles_width
-			X86Ymm tmp = cc.newYmm();
+			X86Ymm tmp = consts.ra.newYmm("tmp");
 			ASM_set1(cc, tmp, i64_tiles_width.r32());
+			consts.ra.free(i64_tiles_width);
 			cc.vmovdqa(consts.simd_i_res_tiles_width, tmp);
 
 			// Set up C_horizontalSlopeDelta and C_negHorizontalSlopeDelta
-			X86Gp i32_width = cc.newI32("i32_width");
+			X86Gp i32_width = consts.ra.newI32("i32_width");
 			cc.mov(i32_width, x86::dword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mWidth)));
 			ASM_set1(cc, tmp, i32_width);
+			consts.ra.free(i32_width);
 			cc.vaddps(tmp, tmp, consts.simd_f_guardband);
 			cc.vmovdqa(consts.simd_f_horizontal_slope_delta, tmp);
 
 			cc.vxorps(tmp, tmp, consts.simd_f_neg_1_0);
 			cc.vmovdqa(consts.simd_f_neg_horizontal_slope_delta, tmp);
+			consts.ra.free(tmp);
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -1136,35 +1343,39 @@ public:
 		// Compute bounding box and clamp to tile coordinates
 		//////////////////////////////////////////////////////////////////////////////
 
-		X86Ymm bbPixelMinX = cc.newYmm("bbPixelMinX");
-		X86Ymm bbPixelMinY = cc.newYmm("bbPixelMinY");
-		X86Ymm bbPixelMaxX = cc.newYmm("bbPixelMaxX");
-		X86Ymm bbPixelMaxY = cc.newYmm("bbPixelMaxY");
+		X86Ymm bbPixelMinX = consts.ra.newYmm("bbPixelMinX");
+		X86Ymm bbPixelMinY = consts.ra.newYmm("bbPixelMinY");
 
-		X86Ymm bbTileMinX = cc.newYmm("bbTileMinX");
-		X86Ymm bbTileMinY = cc.newYmm("bbTileMinY");
-		X86Ymm bbTileMaxX = cc.newYmm("bbTileMaxX");
-		X86Ymm bbTileMaxY = cc.newYmm("bbTileMaxY");
+		X86Ymm bbTileMinX = consts.ra.newYmm("bbTileMinX");
+		X86Ymm bbTileMinY = consts.ra.newYmm("bbTileMinY");
+		X86Ymm bbTileMaxY = consts.ra.newYmm("bbTileMaxY");
 
 		{
+			X86Ymm bbPixelMaxX = consts.ra.newYmm("bbPixelMaxX");
+			X86Ymm bbPixelMaxY = consts.ra.newYmm("bbPixelMaxY");
+
+			X86Ymm bbTileMaxX = consts.ra.newYmm("bbTileMaxX");
+
 			ASM_ComputeBoundingBox(cc, consts, bbPixelMinX, bbPixelMinY, bbPixelMaxX, bbPixelMaxY, pVtxX, pVtxY, scissorPtr);
 
 			// Clamp bounding box to tiles (it's already padded in computeBoundingBox)
-			X86Ymm bbTileSizeX = cc.newYmm("bbTileSizeX");
-			X86Ymm bbTileSizeY = cc.newYmm("bbTileSizeY");
-
 			cc.vpsrad(bbTileMinX, bbPixelMinX, TILE_WIDTH_SHIFT);               // bbTileMinX = bbPixelMinX >> TILE_WIDTH_SHIFT
 			cc.vpsrad(bbTileMinY, bbPixelMinY, TILE_HEIGHT_SHIFT);              // bbTileMinY = bbPixelMinY >> TILE_HEIGHT_SHIFT
 			cc.vpsrad(bbTileMaxX, bbPixelMaxX, TILE_WIDTH_SHIFT);               // bbTileMaxX = bbPixelMaxX >> TILE_WIDTH_SHIFT
+			consts.ra.free(bbPixelMaxX);
 			cc.vpsrad(bbTileMaxY, bbPixelMaxY, TILE_HEIGHT_SHIFT);              // bbTileMaxY = bbPixelMaxY >> TILE_HEIGHT_SHIFT
-			cc.vpsubd(bbTileSizeX, bbPixelMaxX, bbPixelMinX);                     // bbTileSizeX = bbTileMaxX - bbTileMinX
-			cc.vpsubd(bbTileSizeY, bbPixelMaxY, bbPixelMinY);                     // bbTileSizeY = bbTileMaxY - bbTileMinY
+			consts.ra.free(bbPixelMaxY);
+			X86Ymm bbTileSizeX = consts.ra.newYmm("bbTileSizeX");
+			cc.vpsubd(bbTileSizeX, bbTileMaxX, bbTileMinX);                     // bbTileSizeX = bbTileMaxX - bbTileMinX
+			consts.ra.free(bbTileMaxX);
+			X86Ymm bbTileSizeY = consts.ra.newYmm("bbTileSizeY");
+			cc.vpsubd(bbTileSizeY, bbTileMaxY, bbTileMinY);                     // bbTileSizeY = bbTileMaxY - bbTileMinY
 
 			// Cull triangles with zero bounding box
-			X86Ymm bbAreaSign = cc.newYmm("bbAreaSign");
-			X86Ymm bbX_1 = cc.newYmm("bbX_1");
-			X86Ymm bbY_1 = cc.newYmm("bbY_1");
-			X86Gp bbAreaMask = cc.newI32("bbAreaMask");
+			X86Ymm bbX_1 = consts.ra.newYmm("bbX_1");
+			X86Ymm bbY_1 = consts.ra.newYmm("bbY_1");
+			X86Ymm bbAreaSign = consts.ra.newYmm("bbAreaSign");
+			X86Gp bbAreaMask = consts.ra.newI32("bbAreaMask");
 
 			cc.vpsubd(bbY_1, bbTileSizeY, consts.simd_i_1);                     // bbY_1 = bbTileSizeY - 1
 			cc.vpsubd(bbX_1, bbTileSizeX, consts.simd_i_1);                     // bbX_1 = bbTileSizeX - 1
@@ -1175,12 +1386,17 @@ public:
 			cc.and_(triMask, bbAreaMask);                                       // triMask &= bbAreaMask
 			cc.jz(L_ViewCulledExit);
 
+			consts.ra.free(bbX_1);
+			consts.ra.free(bbY_1);
+			consts.ra.free(bbAreaSign);
+			consts.ra.free(bbAreaMask);
+
 			//////////////////////////////////////////////////////////////////////////////
 			// Store bounding box top/bottom indices used later during traversal
 			//////////////////////////////////////////////////////////////////////////////
 
-			X86Ymm bbBottomIdx = cc.newYmm("bbBottomIdx");
-			X86Ymm bbTopIdx = cc.newYmm("bbTopIdx");
+			X86Ymm bbBottomIdx = consts.ra.newYmm("bbBottomIdx");
+			X86Ymm bbTopIdx = consts.ra.newYmm("bbTopIdx");
 
 			cc.vpmulld(bbBottomIdx, bbTileMinY, consts.simd_i_res_tiles_width); // bbBottomIdx = bbTileMinY * simd_i_res_tiles_width
 			cc.vpaddd(bbBottomIdx, bbBottomIdx, bbTileMinX);                    // bbBottomIdx += bbTileMinX
@@ -1194,6 +1410,11 @@ public:
 			cc.vmovaps(Mem_bbTopIdx, bbTopIdx);
 			cc.vmovaps(Mem_bbTileSizeX, bbTileSizeX);
 			cc.vmovaps(Mem_bbTileSizeY, bbTileSizeY);
+
+			consts.ra.free(bbBottomIdx);
+			consts.ra.free(bbTopIdx);
+			consts.ra.free(bbTileSizeX);
+			consts.ra.free(bbTileSizeY);
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -1201,49 +1422,42 @@ public:
 		//////////////////////////////////////////////////////////////////////////////
 
 		{
-			X86Ymm zPixelDx = cc.newYmm("zPixelDx");
-			X86Ymm zPixelDy = cc.newYmm("zPixelDy");
-			X86Ymm zPixel0 = cc.newYmm("zPixel0");
-			X86Ymm zPlaneOffset = cc.newYmm("zPlaneOffset/bbMinXV0");
-			X86Ymm &bbMinXV0 = zPlaneOffset;
-			X86Ymm bbMinYV0 = cc.newYmm("bbMinYV0");
-			X86Ymm zSubTileDx = cc.newYmm("zSubTileDx");
-			X86Ymm zSubTileDy = cc.newYmm("zSubTileDy");
-			X86Ymm zMin = cc.newYmm("zMin");
-			X86Ymm zMax = cc.newYmm("zMax");
-
-			X86Ymm is_pVtxX0 = cc.newYmm("IS_pVtxX0");
-			X86Ymm is_pVtxY0 = cc.newYmm("IS_pVtxY0");
-			X86Ymm is_pVtxZ0 = cc.newYmm("IS_pVtxZ0");
-
+			X86Ymm is_pVtxX0 = consts.ra.newYmm("IS_pVtxX0");
 			cc.vmovaps(is_pVtxX0, pVtxX[0]);
+			
+			X86Ymm is_pVtxY0 = consts.ra.newYmm("IS_pVtxY0");
 			cc.vmovaps(is_pVtxY0, pVtxY[0]);
+			
+			X86Ymm is_pVtxZ0 = consts.ra.newYmm("IS_pVtxZ0");
 			cc.vmovaps(is_pVtxZ0, pVtxZ[0]);
 
-			ASM_InterpolationSetup(cc, consts, pVtxX, pVtxY, pVtxZ, is_pVtxX0, is_pVtxY0, is_pVtxZ0, zPixelDx, zPixelDy, zPixel0);
-
-			// Compute Zmin and Zmax for the triangle (used to narrow the range for difficult tiles)
-			cc.vminps(zMin, is_pVtxZ0, pVtxZ[1]);                               // zTriMin = min(pVtxZ[0], pVtxZ[1])
-			cc.vminps(zMin, zMin, pVtxZ[2]);                                    // zTriMin = min(zTriMin, pVtxZ[2])
-			cc.vmaxps(zMax, is_pVtxZ0, pVtxZ[1]);                               // zTriMax = min(pVtxZ[0], pVtxZ[1])
-			cc.vmaxps(zMax, zMax, pVtxZ[2]);                                    // zTriMax = min(zTriMax, pVtxZ[1])
+			X86Ymm zPixelDx = consts.ra.newYmm("zPixelDx");
+			X86Ymm zPixelDy = consts.ra.newYmm("zPixelDy");
+			ASM_InterpolationSetup(cc, consts, pVtxX, pVtxY, pVtxZ, is_pVtxX0, is_pVtxY0, is_pVtxZ0, zPixelDx, zPixelDy);
 
 			// Compute z value at min corner of bounding box. Offset to make sure z is conservative for all 8x4 subtiles
-			cc.vcvtdq2ps(bbMinXV0, bbPixelMinX);                                // bbMinXV0 = cvtepi32_ps(bbPixelMinX)
+			X86Ymm zPlaneOffset = consts.ra.newYmm("zPlaneOffset/bbMinXV0");
+			cc.vcvtdq2ps(zPlaneOffset, bbPixelMinX);                            // bbMinXV0 = cvtepi32_ps(bbPixelMinX)
+			X86Ymm bbMinYV0 = consts.ra.newYmm("bbMinYV0");
 			cc.vcvtdq2ps(bbMinYV0, bbPixelMinY);                                // bbMinYV0 = cvtepi32_ps(bbPixelMinY)
-			cc.vsubps(bbMinXV0, bbMinXV0, is_pVtxX0);                           // bbMinXV0 -= pVtxX[0]
+			cc.vsubps(zPlaneOffset, zPlaneOffset, is_pVtxX0);                   // bbMinXV0 -= pVtxX[0]
+			consts.ra.free(is_pVtxX0);
 			cc.vsubps(bbMinYV0, bbMinYV0, is_pVtxY0);                           // bbMinYV0 -= pVtxY[0]
+			consts.ra.free(is_pVtxY0);
 
 			cc.vfmadd213ps(bbMinYV0, zPixelDy, is_pVtxZ0);                      // bbMinYV0 = bbMinYV0*zPixelDy + pVtxZ[0]
 			cc.vfmadd132ps(zPlaneOffset, bbMinYV0, zPixelDx);                   // zPlaneOffset = bbMinXV0*zPixelDx + bbMinYV0
+			consts.ra.free(bbMinYV0);
 
+			X86Ymm zSubTileDx = consts.ra.newYmm("zSubTileDx");
+			X86Ymm zSubTileDy = consts.ra.newYmm("zSubTileDy");
 			cc.vmulps(zSubTileDx, zPixelDx, consts.simd_f_sub_tile_width);      // zSubTileDx = zPixelDx * SUB_TILE_WIDTH
 			cc.vmulps(zSubTileDy, zPixelDy, consts.simd_f_sub_tile_height);     // zSubTileDy = zPixelDy * SUB_TILE_HEIGHT
 
 			if (TEST_Z)
 			{
-				X86Ymm C_zerobits = cc.newYmm("C_zerobits");
-				cc.vpxor(C_zerobits, C_zerobits, C_zerobits);
+				X86Ymm C_zerobits = cc.newYmm("ASM_RasterizeTriangleBatch::C_zerobits");
+				cc.vpxor(C_zerobits, x86::ymm0, x86::ymm0);                     // amjit bug workaround: cc.vpxor(C_zerobits, C_zerobits, C_zerobits) breaks register allocator
 
 				cc.vmaxps(zSubTileDx, zSubTileDx, C_zerobits);                  // zSubTileDx = max(0, zSubTileDx)
 				cc.vmaxps(zSubTileDy, zSubTileDy, C_zerobits);                  // zSubTileDy = max(0, zSubTileDy)
@@ -1252,14 +1466,25 @@ public:
 			}
 			else
 			{
-				X86Ymm C_zerobits = cc.newYmm("C_zerobits");
-				cc.vpxor(C_zerobits, C_zerobits, C_zerobits);
+				X86Ymm C_zerobits = cc.newYmm("ASM_RasterizeTriangleBatch::C_zerobits");
+				cc.vpxor(C_zerobits, x86::ymm0, x86::ymm0);                     // amjit bug workaround: cc.vpxor(C_zerobits, C_zerobits, C_zerobits) breaks register allocator
 
 				cc.vminps(zSubTileDx, zSubTileDx, C_zerobits);                  // zSubTileDx = min(0, zSubTileDx)
 				cc.vminps(zSubTileDy, zSubTileDy, C_zerobits);                  // zSubTileDy = min(0, zSubTileDy)
 				cc.vaddps(zPlaneOffset, zPlaneOffset, zSubTileDx);              // zPlaneOffset += zSubTileDx
 				cc.vaddps(zPlaneOffset, zPlaneOffset, zSubTileDy);              // zPlaneOffset += zSubTileDy
 			}
+			consts.ra.free(zSubTileDy);
+			consts.ra.free(zSubTileDx);
+
+			// Compute Zmin and Zmax for the triangle (used to narrow the range for difficult tiles)
+			X86Ymm zMin = consts.ra.newYmm("zMin");
+			X86Ymm zMax = consts.ra.newYmm("zMax");
+			cc.vminps(zMin, is_pVtxZ0, pVtxZ[1]);                               // zMin = min(pVtxZ[0], pVtxZ[1])
+			cc.vminps(zMin, zMin, pVtxZ[2]);                                    // zMin = min(zMin, pVtxZ[2])
+			cc.vmaxps(zMax, is_pVtxZ0, pVtxZ[1]);                               // zMax = min(pVtxZ[0], pVtxZ[1])
+			cc.vmaxps(zMax, zMax, pVtxZ[2]);                                    // zMax = min(zMax, pVtxZ[1])
+			consts.ra.free(is_pVtxZ0);
 
 			// Write to stack so we can access simd lanes later
 			cc.vmovaps(Mem_zPixelDx, zPixelDx);
@@ -1267,6 +1492,12 @@ public:
 			cc.vmovaps(Mem_zPlaneOffset, zPlaneOffset);
 			cc.vmovaps(Mem_zMin, zMin);
 			cc.vmovaps(Mem_zMax, zMax);
+
+			consts.ra.free(zPixelDx);
+			consts.ra.free(zPixelDy);
+			consts.ra.free(zPlaneOffset);
+			consts.ra.free(zMin);
+			consts.ra.free(zMax);
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -1302,22 +1533,22 @@ public:
 		// Compute edges, also find the middle vertex and compute tile
 		//////////////////////////////////////////////////////////////////////////////
 		
-		X86Gp midVtxLeft = cc.newI32();
+		X86Gp midVtxLeft = consts.ra.newI32("midVtxLeft");
 
 		{
 
-			X86Ymm e_pVtxX1 = cc.newYmm("E_pVtxX1");
-			X86Ymm e_pVtxY1 = cc.newYmm("E_pVtxY1");
-			X86Ymm e_pVtxX2 = cc.newYmm("E_pVtxX2");
-			X86Ymm e_pVtxY2 = cc.newYmm("E_pVtxY2");
+			X86Ymm e_pVtxX1 = consts.ra.newYmm("E_pVtxX1");
+			X86Ymm e_pVtxY1 = consts.ra.newYmm("E_pVtxY1");
+			X86Ymm e_pVtxX2 = consts.ra.newYmm("E_pVtxX2");
+			X86Ymm e_pVtxY2 = consts.ra.newYmm("E_pVtxY2");
 			cc.vmovaps(e_pVtxX1, pVtxX[1]);
 			cc.vmovaps(e_pVtxY1, pVtxY[1]);
 			cc.vmovaps(e_pVtxX2, pVtxX[2]);
 			cc.vmovaps(e_pVtxY2, pVtxY[2]);
 
 			// Compute edges
-			X86Ymm edgeX[3] = { cc.newYmm("edgeX[0]"), cc.newYmm("edgeX[1]"), cc.newYmm("edgeX[2]") };
-			X86Ymm edgeY[3] = { cc.newYmm("edgeY[0]"), cc.newYmm("edgeY[1]"), cc.newYmm("edgeY[2]") };
+			X86Ymm edgeX[3] = { consts.ra.newYmm("edgeX[0]"), consts.ra.newYmm("edgeX[1]"), consts.ra.newYmm("edgeX[2]") };
+			X86Ymm edgeY[3] = { consts.ra.newYmm("edgeY[0]"), consts.ra.newYmm("edgeY[1]"), consts.ra.newYmm("edgeY[2]") };
 
 			cc.vsubps(edgeX[0], e_pVtxX1, pVtxX[0]);                            // edgeX[0] = pVtxX[1] - pVtxX[0]
 			cc.vsubps(edgeX[1], e_pVtxX2, e_pVtxX1);                            // edgeX[1] = pVtxX[2] - pVtxX[1]
@@ -1325,25 +1556,29 @@ public:
 			cc.vsubps(edgeY[0], e_pVtxY1, pVtxY[0]);                            // edgeY[0] = pVtxY[1] - pVtxY[0]
 			cc.vsubps(edgeY[1], e_pVtxY2, e_pVtxY1);                            // edgeY[1] = pVtxY[2] - pVtxY[1]
 			cc.vsubps(edgeY[2], e_pVtxY2, pVtxY[0]);                            // edgeY[2] = pVtxY[2] - pVtxY[0]
+			consts.ra.free(e_pVtxX2);
+			consts.ra.free(e_pVtxY2);
 
 			// Classify if the middle vertex is on the left or right and compute its position
-			X86Ymm midPixelX = cc.newYmm("midPixelX");
-			X86Ymm midPixelY = cc.newYmm("midPixelY");
-			X86Ymm midTileY = cc.newYmm("midTileY");
-			X86Ymm bbMidTileY = cc.newYmm("bbMidTileY");
 
 			cc.vmovmskps(midVtxLeft, edgeY[1]);                                 // midVtxLeft = movemask_ps(edgeY[i])
+			X86Ymm midPixelX = consts.ra.newYmm("midPixelX");
 			cc.vblendvps(midPixelX, e_pVtxX1, pVtxX[2], edgeY[1]);              // midPixelX = blendv_ps(pVtxX[1], pVtxX[2], edgeY[1])
+			X86Ymm midPixelY = consts.ra.newYmm("midPixelY");
 			cc.vblendvps(midPixelY, e_pVtxY1, pVtxY[2], edgeY[1]);              // midPixelY = blendv_ps(pVtxY[1], pVtxY[2], edgeY[1])
+			consts.ra.free(e_pVtxX1);
+			consts.ra.free(e_pVtxY1);
+			X86Ymm C_zerobits = consts.ra.newYmm("ASM_RasterizeTriangleBatch::C_zerobits");
+			cc.vpxor(C_zerobits, x86::ymm0, x86::ymm0);                         // amjit bug workaround: cc.vpxor(C_zerobits, C_zerobits, C_zerobits) breaks register allocator
 
-			X86Ymm C_zerobits = cc.newYmm("C_zerobits");
-			cc.vpxor(C_zerobits, C_zerobits, C_zerobits);
-
+			X86Ymm midTileY = consts.ra.newYmm("midTileY");
 			cc.vcvttps2dq(midTileY, midPixelY);                                 // midTileY = cvttps_epi32(midPixelY)
 			cc.vpmaxsd(midTileY, midTileY, C_zerobits);                         // midTileY = max(midTileY, 0)
 			cc.vpsrad(midTileY, midTileY, TILE_HEIGHT_SHIFT);                   // midtileY >>= TILE_HEIGHT_SHIFT
 
+			X86Ymm bbMidTileY = consts.ra.newYmm("bbMidTileY");
 			cc.vpminsd(bbMidTileY, bbTileMaxY, midTileY);                       // bbMidTileY = min(bbTileMaxY, midTileY)
+			consts.ra.free(bbTileMaxY);
 			cc.vpmaxsd(bbMidTileY, bbMidTileY, bbTileMinY);                     // bbMidTileY = max(bbMidTileY, bbTileMinY)
 
 			//////////////////////////////////////////////////////////////////////////////
@@ -1351,94 +1586,119 @@ public:
 			//////////////////////////////////////////////////////////////////////////////
 
 			// Compute floating point slopes
-			X86Ymm slope[3] = { cc.newYmm("slope[0]"), cc.newYmm("slope[1]"), cc.newYmm("slope[2]") };
+			X86Ymm slope[3];
 			for (int i = 0; i < 3; ++i)
+			{
+				slope[i] = consts.ra.newYmm("slope[0]");
 				cc.vdivps(slope[i], edgeX[i], edgeY[i]);                        // slope[i] = edgeX[i] / edgeY[i]
+				consts.ra.free(edgeX[i]);
+			}
+			consts.ra.free(edgeY[2]);
 
 			// Modify slope of horizontal edges to make sure they mask out pixels above/below the edge. The slope is set to screen
 			// width to mask out all pixels above or below the horizontal edge. We must also add a small bias to acount for that
 			// vertices may end up off screen due to clipping. We're assuming that the round off error is no bigger than 1.0
-			X86Ymm cnd0 = cc.newYmm("cnd0");
-			X86Ymm cnd1 = cc.newYmm("cnd1");
-
+			X86Ymm cnd0 = consts.ra.newYmm("cnd0");
 			cc.vcmpps(cnd0, edgeY[0], C_zerobits, _CMP_EQ_OQ);
-			cc.vcmpps(cnd1, edgeY[1], C_zerobits, _CMP_EQ_OQ);
+			consts.ra.free(edgeY[0]);
 			cc.vblendvps(slope[0], slope[0], consts.simd_f_horizontal_slope_delta, cnd0);
+			consts.ra.free(cnd0);
+
+			X86Ymm cnd1 = consts.ra.newYmm("cnd1");
+			cc.vcmpps(cnd1, edgeY[1], C_zerobits, _CMP_EQ_OQ);
+			consts.ra.free(C_zerobits);
 			cc.vblendvps(slope[1], slope[1], consts.simd_f_neg_horizontal_slope_delta, cnd1);
+			consts.ra.free(cnd1);
 
 			// Convert floaing point slopes to fixed point
-			X86Ymm slopeFP[3] = { cc.newYmm("slopeFP[0]"), cc.newYmm("slopeFP[1]"), cc.newYmm("slopeFP[2]") };
-
+			X86Ymm slopeFP[3];
 			for (int i = 0; i < 3; ++i)
 			{
+				slopeFP[3] = consts.ra.newYmm("slopeFP[%d]");
 				cc.vmulps(slopeFP[i], slope[i], consts.simd_f_shl_fp_bits);     // slopeFP[i] = slope[i] * (1 << FP_BITS)
 				cc.vcvtps2dq(slopeFP[i], slopeFP[i]);                           // slopeFP[i] = cvtps_epi32(slopeFP[i])
+				consts.ra.free(slope[i]);
 			}
 
 			// Fan out edge slopes to avoid (rare) cracks at vertices. We increase right facing slopes
 			// by 1 LSB, which results in overshooting vertices slightly, increasing triangle coverage.
 			// e0 is always right facing, e1 depends on if the middle vertex is on the left or right
-			X86Ymm signY1 = cc.newYmm("signY1");
-
+			X86Ymm signY1 = consts.ra.newYmm("signY1");
 			cc.vpaddd(slopeFP[0], slopeFP[0], consts.simd_i_1);                 // slopeFP[0] += 1;
 			cc.vpsrld(signY1, edgeY[1], 31);                                    // signY1 = edgeY[1] >> 31
+			consts.ra.free(edgeY[1]);
 			cc.vpaddd(slopeFP[1], slopeFP[1], signY1);                          // slopeFP[1] += signY1
+			consts.ra.free(signY1);
 
 			// Compute slope deltas for an SIMD_LANES scanline step (tile height)
-			X86Ymm slopeTileDelta[3] = { cc.newYmm("slopeTileDelta[0]"), cc.newYmm("slopeTileDelta[1]"), cc.newYmm("slopeTileDelta[2]") };
-			for (int i = 0; i < 3; ++i)
-				cc.vpslld(slopeTileDelta[i], slopeFP[i], TILE_HEIGHT_SHIFT);    // slopeTileDelta[i] = slopeFP[i] << TILE_HEIGHT_SHIFT
-
 			for (int i = 0; i < 3; ++i)
 			{
-				cc.vmovaps(Mem_slope[i], slope[i]);
-				cc.vmovaps(Mem_slopeTileDelta[i], slopeTileDelta[i]);
+				X86Ymm slopeTileDelta = consts.ra.newYmm("slopeTileDelta");
+				cc.vpslld(slopeTileDelta, slopeFP[i], TILE_HEIGHT_SHIFT);    // slopeTileDelta[i] = slopeFP[i] << TILE_HEIGHT_SHIFT
+				cc.vmovaps(Mem_slopeFP[i], slopeFP[i]);
+				cc.vmovaps(Mem_slopeTileDelta[i], slopeTileDelta);
+
+				consts.ra.free(slopeTileDelta);
 			}
 
 			// Compute edge events for the bottom of the bounding box, or for the middle tile in case of
 			// the edge originating from the middle vertex.
-			X86Ymm xDiffi[2] = { cc.newYmm("xDiffi[0]"), cc.newYmm("xDiffi[1]") };
-			X86Ymm yDiffi[2] = { cc.newYmm("yDiffi[0]"), cc.newYmm("yDiffi[1]") };
-			X86Ymm midTilePixelY = cc.newYmm("midTilePixelX");
+			X86Ymm xDiffi[2] = { consts.ra.newYmm("xDiffi[0]"), consts.ra.newYmm("xDiffi[1]") };
+			X86Ymm yDiffi[2] = { consts.ra.newYmm("yDiffi[0]"), consts.ra.newYmm("yDiffi[1]") };
+			X86Ymm midTilePixelY = consts.ra.newYmm("midTilePixelX");
 
 			cc.vcvttps2dq(xDiffi[0], pVtxX[0]);                                 // xDiffi[0] = cvttps_epi32(pVtxX[0])
 			cc.vpsubd(xDiffi[0], xDiffi[0], bbPixelMinX);                       // xDiffi[0] -= bbPixelMinX
 			cc.vpslld(xDiffi[0], xDiffi[0], FP_BITS);                           // xDiffi[0] <<= FP_BITS
 
 			cc.vcvttps2dq(xDiffi[1], midPixelX);                                // xDiffi[1] = cvttps_epi32(midPixelX)
+			consts.ra.free(midPixelX);
 			cc.vpsubd(xDiffi[1], xDiffi[1], bbPixelMinX);                       // xDiffi[1] -= bbPixelMinX
+			consts.ra.free(bbPixelMinX);
 			cc.vpslld(xDiffi[1], xDiffi[1], FP_BITS);                           // xDiffi[1] <<= FP_BITS
 
 			cc.vcvttps2dq(yDiffi[0], pVtxY[0]);                                 // yDiffi[0] = cvttps_epi32(pVtxY[0])
 			cc.vpsubd(yDiffi[0], yDiffi[0], bbPixelMinY);                       // yDiffi[0] -= bbPixelMinY
+			consts.ra.free(bbPixelMinY);
 
 			cc.vpslld(midTilePixelY, bbMidTileY, TILE_HEIGHT);                  // midTilePixelY = bbMidTileY << TILE_HEIGHT_SHIFT
+			consts.ra.free(bbMidTileY);
 			cc.vcvttps2dq(yDiffi[1], midPixelY);                                // yDiffi[1] = cvttps_epi32(midPixelY)
-			cc.vpsubd(yDiffi[1], yDiffi[1], midTilePixelY);                     // yDiffi[1] -= bbPixelMinY
-
-			X86Ymm eventStart[3] = { cc.newYmm("eventStart[0]"), cc.newYmm("eventStart[1]"), cc.newYmm("eventStart[2]") };
-			cc.vpmulld(eventStart[0], slopeFP[0], yDiffi[0]);                   // eventStart[0] = slopeFP[0] * yDiffi[0]
-			cc.vpmulld(eventStart[1], slopeFP[1], yDiffi[1]);                   // eventStart[1] = slopeFP[1] * yDiffi[1]
-			cc.vpmulld(eventStart[2], slopeFP[2], yDiffi[0]);                   // eventStart[2] = slopeFP[2] * yDiffi[0]
-			cc.vpsubd(eventStart[0], xDiffi[0], eventStart[0]);                 // eventStart[0] = xDiffi[0] - eventStart[0]
-			cc.vpsubd(eventStart[1], xDiffi[1], eventStart[1]);                 // eventStart[1] = xDiffi[1] - eventStart[1]
-			cc.vpsubd(eventStart[2], xDiffi[0], eventStart[2]);                 // eventStart[2] = xDiffi[2] - eventStart[2]
+			consts.ra.free(midPixelY);
+			cc.vpsubd(yDiffi[1], yDiffi[1], midTilePixelY);                     // yDiffi[1] -= midTilePixelY
+			consts.ra.free(midTilePixelY);
 
 			for (int i = 0; i < 3; ++i)
-				cc.vmovaps(Mem_eventStart[i], eventStart[i]);
+			{
+				X86Ymm eventStart = consts.ra.newYmm("eventStart[%d]");
+				cc.vpmulld(eventStart, slopeFP[i], yDiffi[i & 1]);              // eventStart = slopeFP[i] * yDiffi[i & 1]
+				cc.vpsubd(eventStart, xDiffi[i & 1], eventStart);               // eventStart = xDiffi[i & 1] - eventStart
+				cc.vmovaps(Mem_eventStart[i], eventStart);
+
+				consts.ra.free(slopeFP[i]);
+				consts.ra.free(eventStart);
+			}
+			consts.ra.free(xDiffi[0]);
+			consts.ra.free(xDiffi[1]);
+			consts.ra.free(yDiffi[0]);
+			consts.ra.free(yDiffi[1]);
 #endif
 
 			//////////////////////////////////////////////////////////////////////////////
 			// Split bounding box into bottom - middle - top region.
 			//////////////////////////////////////////////////////////////////////////////
 
-			X86Ymm bbMidIdx = cc.newYmm("bbMidIdx");
+			X86Ymm bbMidIdx = consts.ra.newYmm("bbMidIdx");
 
 			cc.vpmulld(bbMidIdx, midTileY, consts.simd_i_res_tiles_width);      // bbBottomIdx = bbTileMinY * simd_i_res_tiles_width
+			consts.ra.free(midTileY);
 			cc.vpaddd(bbMidIdx, bbMidIdx, bbTileMinX);                          // bbBottomIdx += bbTileMinX
+			consts.ra.free(bbTileMinY);
+			consts.ra.free(bbTileMinX);
 
 			// Move indices to stack so we can access individual lanes
 			cc.vmovaps(Mem_bbMidIdx, bbMidIdx);
+			consts.ra.free(bbMidIdx);
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -1476,7 +1736,7 @@ public:
 #if PRECISE_COVERAGE != 0
 #endif
 				Mem_eventStart[i].setIndex(triIdx, 2);
-				Mem_slope[i].setIndex(triIdx, 2);
+				Mem_slopeFP[i].setIndex(triIdx, 2);
 				Mem_slopeTileDelta[i].setIndex(triIdx, 2);
 			}
 
@@ -1486,6 +1746,8 @@ public:
 			X86Ymm zTriMax = cc.newYmm("zTriMax");
 			ASM_set1(cc, zTriMin, Mem_zMin);                                               // zTriMin = zMin.m_f32[triIdx]
 			ASM_set1(cc, zTriMax, Mem_zMax);                                               // zTriMax = zMax.m_f32[triIdx]
+			cc.vmovaps(Mem_zTriMin, zTriMin);                                              // constant per triangle, spill to stack
+			cc.vmovaps(Mem_zTriMax, zTriMax);                                              // constant per triangle, spill to stack
 
 			// Setup Zmin value for first set of 8x4 subtiles
 			X86Ymm zTri0 = cc.newYmm("zTri0");
@@ -1502,6 +1764,8 @@ public:
 
 			cc.vmulps(zTriTileDx, zTriPixelDx, consts.simd_f_tile_width);                   // zTriTileDx = zTriPixelDx * TILE_WIDTH
 			cc.vmulps(zTriTileDy, zTriPixelDy, consts.simd_f_tile_height);                  // zTriTileDy = zTriPixelDy * TILE_HEIGHT
+			cc.vmovaps(Mem_zTriTileDx, zTriTileDx);                                         // constant per triangle, spill to stack
+			cc.vmovaps(Mem_zTriTileDx, zTriTileDx);                                         // constant per triangle, spill to stack
 
 			// Get dimension of bounding box bottom, mid & top segments
 			X86Gp bbWidth = cc.newI32("bbWidth");
@@ -1513,9 +1777,9 @@ public:
 			cc.mov(bbWidth, Mem_bbTileSizeX);                                               // bbWidth = bbTileSizeX.m_i32[triIdx]
 			cc.mov(bbHeight, Mem_bbTileSizeY);                                              // bbHeight = bbTileSizeY.m_i32[triIdx]
 
-			cc.mov(tileRowAddr, 0);                                                         // tileRowAddr = 0
-			cc.mov(tileMidRowAddr, 0);                                                      // tileMidRowAddr = 0
-			cc.mov(tileEndRowAddr, 0);                                                      // tileendRowAddr = 0
+			cc.xor_(tileRowAddr, tileRowAddr);                                              // tileRowAddr = 0
+			cc.xor_(tileMidRowAddr, tileMidRowAddr);                                        // tileMidRowAddr = 0
+			cc.xor_(tileEndRowAddr, tileEndRowAddr);                                        // tileendRowAddr = 0
 			cc.mov(tileRowAddr.r32(), Mem_bbBottomIdx);                                     // tileRowAddr = (int64_t)bbBottomIdx.m_i32[triIdx]
 			cc.mov(tileMidRowAddr.r32(), Mem_bbMidIdx);                                     // tileMidRowAddr = (int64_t)bbMidIdx.m_i32[triIdx]
 			cc.mov(tileEndRowAddr.r32(), Mem_bbTopIdx);                                     // tileendRowAddr = (int64_t)bbTopIdx.m_i32[triIdx]
@@ -1562,11 +1826,11 @@ public:
 //				cc.cmp(triMidVtxLeft, 0);
 //				cc.jne(L_else);
 //				{
-					ASM_RasterizeTriangle(cc, TEST_Z, 1, 0, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slope, Mem_slopeTileDelta, zTriMin, zTriMax, zTri0, zTriTileDx, zTriTileDy);
+					ASM_RasterizeTriangle(cc, TEST_Z, 1, 0, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slopeFP, Mem_slopeTileDelta, Mem_zTriMin, Mem_zTriMax, zTri0, Mem_zTriTileDx, Mem_zTriTileDy);
 //				}
 //				cc.bind(L_else);
 //				{
-//					ASM_RasterizeTriangle(cc, TEST_Z, 1, 1, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slope, Mem_slopeTileDelta, zTriMin, zTriMax, zTri0, zTriTileDx, zTriTileDy);
+//					ASM_RasterizeTriangle(cc, TEST_Z, 1, 1, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slope, Mem_slopeTileDelta, Mem_zTriMin, Mem_zTriMax, zTri0, Mem_zTriTileDx, Mem_zTriTileDy);
 //				}
 //				cc.bind(L_exit);
 //#endif
@@ -1593,24 +1857,25 @@ public:
 			cc.bind(L_EndSmallTriangle);
 		}
 		cc.bind(L_TriLoopExit);
+		consts.ra.free(midVtxLeft);
 
 		// Went through the whole loop, means everytrhing was occluded (if we're testing)
-		X86Gp cullingResult = cc.newI32("cullingResult");
-		cc.mov(cullingResult, TEST_Z ? OCCLUDED : VISIBLE);
-		cc.ret(cullingResult);
+		cc.mov(x86::rax, TEST_Z ? OCCLUDED : VISIBLE);
+		cc.jmp(L_Exit);
 
 		// Everything was view culled
 		cc.bind(L_ViewCulledExit);
-		cc.mov(cullingResult, VIEW_CULLED);
-		cc.ret(cullingResult);
+		cc.mov(x86::rax, VIEW_CULLED);
 
 		// Early exit for when using TestZ
 		if (TEST_Z)
 		{
+			cc.jmp(L_Exit);
 			cc.bind(L_VisibleExit);
-			cc.mov(cullingResult, VISIBLE);
-			cc.ret(cullingResult);
+			cc.mov(x86::rax, VISIBLE);
 		}
+		cc.bind(L_Exit);
+		cc.ret(x86::eax);
 	}
 
 	void GenerateASM()
@@ -1659,11 +1924,6 @@ public:
 		cc.finalize();
 
 		mRuntime.add(&mASMRasterizeTriangleBatch, &code);
-
-		//__mwi a = _mmw_set1_epi32(~0);
-		//__mw b = _mmw_set1_ps(6.3), c[3];
-		//fn(&mMaskedHiZBuffer[0], (__mw*)&a, &b);
-		//int ap = 0;
 	}
 
 	~MaskedOcclusionCullingPrivate() override
@@ -4046,5 +4306,4 @@ public:
 	{
 		return mStats;
 	}
-
 };
