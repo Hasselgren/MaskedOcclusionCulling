@@ -13,10 +13,14 @@
 // License for the specific language governing permissions and limitations
 // under the License.
 ////////////////////////////////////////////////////////////////////////////////
+#include <string>
+#include <vector>
 #include <string.h>
 #include <assert.h>
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
+
 #include "MaskedOcclusionCulling.h"
 #include "MaskedOcclusionTextureInternal.h"
 #include "CompilerSpecific.inl"

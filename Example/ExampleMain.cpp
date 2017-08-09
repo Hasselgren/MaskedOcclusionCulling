@@ -189,7 +189,8 @@ int main(int argc, char* argv[])
 	MaskedOcclusionTexture *texture = CreateCircleTexture();
 	MaskedOcclusionCulling::VertexLayout texLayout(6*sizeof(float), 4, 12, 16, 20);
 
-	moc->RenderTexturedTriangles((float*)ttriVerts, ttriIndices, 1, texture, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
+	//moc->RenderTexturedTriangles((float*)ttriVerts, ttriIndices, 1, texture, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
+	moc->RenderTriangles((float*)ttriVerts, ttriIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
 
 	////////////////////////////////////////////////////////////////////////////////////////
 	// Perform some occlusion queries
@@ -200,14 +201,14 @@ int main(int argc, char* argv[])
 	unsigned int oqTriIndices[] = { 0, 1, 2 };
 
 	// Perform an occlusion query. The triangle is visible and the query should return VISIBLE
-	MaskedOcclusionCulling::CullingResult result;
-	result = moc->TestTriangles((float*)oqTriVerts, oqTriIndices, 1);
-	if (result == MaskedOcclusionCulling::VISIBLE)
-		printf("Tested triangle is VISIBLE\n");
-	else if (result == MaskedOcclusionCulling::OCCLUDED)
-		printf("Tested triangle is OCCLUDED\n");
-	else if (result == MaskedOcclusionCulling::VIEW_CULLED)
-		printf("Tested triangle is outside view frustum\n");
+	//MaskedOcclusionCulling::CullingResult result;
+	//result = moc->TestTriangles((float*)oqTriVerts, oqTriIndices, 1);
+	//if (result == MaskedOcclusionCulling::VISIBLE)
+	//	printf("Tested triangle is VISIBLE\n");
+	//else if (result == MaskedOcclusionCulling::OCCLUDED)
+	//	printf("Tested triangle is OCCLUDED\n");
+	//else if (result == MaskedOcclusionCulling::VIEW_CULLED)
+	//	printf("Tested triangle is outside view frustum\n");
 
 	// Render the occlusion query triangle to show its position
 	moc->RenderTriangles((float*)oqTriVerts, oqTriIndices, 1);
@@ -232,13 +233,13 @@ int main(int argc, char* argv[])
 
 	// Perform an occlusion query testing if a rectangle is visible. The rectangle is completely
 	// behind the previously drawn quad, so the query should indicate that it's occluded
-	result = moc->TestRect(-0.6f, -0.6f, -0.4f, -0.4f, 100);
-	if (result == MaskedOcclusionCulling::VISIBLE)
-		printf("Tested rect is VISIBLE\n");
-	else if (result == MaskedOcclusionCulling::OCCLUDED)
-		printf("Tested rect is OCCLUDED\n");
-	else if (result == MaskedOcclusionCulling::VIEW_CULLED)
-		printf("Tested rect is outside view frustum\n");
+	//result = moc->TestRect(-0.6f, -0.6f, -0.4f, -0.4f, 100);
+	//if (result == MaskedOcclusionCulling::VISIBLE)
+	//	printf("Tested rect is VISIBLE\n");
+	//else if (result == MaskedOcclusionCulling::OCCLUDED)
+	//	printf("Tested rect is OCCLUDED\n");
+	//else if (result == MaskedOcclusionCulling::VIEW_CULLED)
+	//	printf("Tested rect is outside view frustum\n");
 		
 	// Compute a per pixel depth buffer from the hierarchical depth buffer, used for visualization.
 	float *perPixelZBuffer = new float[width * height];
