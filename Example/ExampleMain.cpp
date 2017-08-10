@@ -143,7 +143,7 @@ int main(int argc, char* argv[])
 	// A triangle that intersects the view frustum
 	ClipspaceVertex triVerts[] = { { 5, 0, 0, 10 }, { 30, 0, 0, 20 }, { 10, 50, 0, 40 } };
 	unsigned int triIndices[] = { 0, 1, 2 };
-	/*
+	
 	// Render the triangle
 	moc->RenderTriangles((float*)triVerts, triIndices, 1);
 
@@ -152,7 +152,7 @@ int main(int argc, char* argv[])
 	unsigned int cwTriIndices[] = { 0, 1, 2 };
 
 	// Render with counter-clockwise backface culling, the triangle is rendered
-	moc->RenderTriangles((float*)cwTriVerts, cwTriIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CCW);
+	//moc->RenderTriangles((float*)cwTriVerts, cwTriIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CCW);
 
 	// A quad completely within the view frustum
 	ClipspaceVertex quadVerts[] = { { -150, -150, 0, 200 }, { -10, -65, 0, 75 }, { 0, 0, 0, 20 }, { -40, 10, 0, 50 } };
@@ -174,23 +174,23 @@ int main(int argc, char* argv[])
 
 	// Render triangle with SoA layout
 	moc->RenderTriangles((float*)SoAVerts, triIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, SoAVertexLayout);
-	*/
-	////////////////////////////////////////////////////////////////////////////////////////
-	// Render textured occluder
-	////////////////////////////////////////////////////////////////////////////////////////
+	
+	//////////////////////////////////////////////////////////////////////////////////////////
+	//// Render textured occluder
+	//////////////////////////////////////////////////////////////////////////////////////////
 
-	// A triangle that intersects the view frustum
-	float ttriVerts[] = { 
-		-30, -30, 0, 60, 0, 0, 
-		30, -30, 0, 60, 1, 0, 
-		30, 30, 0, 60, 1, 1 };
-	unsigned int ttriIndices[] = { 0, 1, 2 };
+	//// A triangle that intersects the view frustum
+	//float ttriVerts[] = { 
+	//	-30, -30, 0, 60, 0, 0, 
+	//	30, -30, 0, 60, 1, 0, 
+	//	30, 30, 0, 60, 1, 1 };
+	//unsigned int ttriIndices[] = { 0, 1, 2 };
 
-	MaskedOcclusionTexture *texture = CreateCircleTexture();
-	MaskedOcclusionCulling::VertexLayout texLayout(6*sizeof(float), 4, 12, 16, 20);
+	//MaskedOcclusionTexture *texture = CreateCircleTexture();
+	//MaskedOcclusionCulling::VertexLayout texLayout(6*sizeof(float), 4, 12, 16, 20);
 
-	//moc->RenderTexturedTriangles((float*)ttriVerts, ttriIndices, 1, texture, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
-	moc->RenderTriangles((float*)ttriVerts, ttriIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
+	////moc->RenderTexturedTriangles((float*)ttriVerts, ttriIndices, 1, texture, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
+	//moc->RenderTriangles((float*)ttriVerts, ttriIndices, 1, nullptr, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, texLayout);
 
 	////////////////////////////////////////////////////////////////////////////////////////
 	// Perform some occlusion queries

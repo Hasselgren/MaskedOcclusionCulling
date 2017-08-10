@@ -471,7 +471,9 @@ public:
 	struct ASM_RasterizerConstants
 	{
 		// Compile time constants
+		X86Mem simd_i_0;
 		X86Mem simd_i_1;
+		X86Mem simd_i_not_0;
 		X86Mem simd_i_pad_w_mask;
 		X86Mem simd_i_pad_h_mask;
 		X86Mem simd_i_tile_width;
@@ -510,7 +512,9 @@ public:
 		ASM_RasterizerConstants(X86Compiler &cc, ASM_RegAllocator &ra)
 		{
 			// Create SIMD integer constants
+			simd_i_0 = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(0));
 			simd_i_1 = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(1));
+			simd_i_not_0 = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0));
 			simd_i_pad_w_mask = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~(TILE_WIDTH - 1)));
 			simd_i_pad_h_mask = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~(TILE_HEIGHT - 1)));
 			simd_i_tile_width = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(TILE_WIDTH));
@@ -565,8 +569,6 @@ public:
 		X86Compiler &cc,
 		ASM_RegAllocator &ra,
 		const ASM_RasterizerConstants &consts,
-		const X86Ymm &C_zerobits,
-		const X86Ymm &C_onebits,
 		const X86Gp &tileAddr,
 		const X86Ymm &coverage, 
 		const X86Ymm &zTri)
@@ -576,31 +578,33 @@ public:
 		cc.mov(_debug_name, 0xDEADC0DE);
 		ra.free(_debug_name);
 #endif
-
 		// Registers / temporaries
 		X86Mem zMinPtr[2] = { x86::yword_ptr(tileAddr, offsetof(ZTile, mZMin[0])), x86::yword_ptr(tileAddr, offsetof(ZTile, mZMin[1])) };
 		X86Mem zMaskPtr = x86::yword_ptr(tileAddr, offsetof(ZTile, mMask));
 
+		X86Ymm zMin0 = ra.newYmm("zMin0");
+		cc.vmovaps(zMin0, zMinPtr[0]);
+		X86Ymm zMin1 = ra.newYmm("zMin1");
+		cc.vmovaps(zMin1, zMinPtr[1]);
+
 		// Mask out all subtiles failing the depth test (don't update these subtiles)
 		X86Ymm sub_t_0_sign = ra.newYmm("sub_t_0_sign");
-		cc.vsubps(sub_t_0_sign, zTri, zMinPtr[0]);                                 // sub_t_0_sign = zTri - tile.zMin[0]
+		cc.vsubps(sub_t_0_sign, zTri, zMin0);                                      // sub_t_0_sign = zTri - tile.zMin[0]
 		cc.vpsrad(sub_t_0_sign, sub_t_0_sign, 31);                                 // sub_t_0_sign >>= 31;
 		X86Ymm deadLane = ra.newYmm("deadLane");
-		cc.vpcmpeqd(deadLane, coverage, C_zerobits);                               // deadLane = coverage == 0 ? ~0 : 0
+		cc.vpcmpeqd(deadLane, coverage, consts.simd_i_0);                          // deadLane = coverage == 0 ? ~0 : 0
 		cc.vpor(deadLane, deadLane, sub_t_0_sign);                                 // deadlane |= sub_t_0_sign
 		X86Ymm maskedCoverage = ra.newYmm("maskedCoverage");
-		ra.free(coverage);
-		ra.free(sub_t_0_sign);
 		cc.vpandn(maskedCoverage, sub_t_0_sign, coverage);                         // maskedCoverage = ~sub_t_0_sign & coverage
+		ra.free(sub_t_0_sign);
+		ra.free(coverage);
 
 		// Use distance heuristic to discard layer 1 if incoming triangle is significantly nearer to observer
 		// than the buffer contents. See Section 3.2 in "Masked Software Occlusion Culling"
 		X86Ymm &diff_t_0_1 = ra.newYmm("diff_t_0_1");
-		cc.vaddps(diff_t_0_1, zTri, zMinPtr[0]);                                   // diff_t_0_1 = zTri + tile.zMin[0]
+		cc.vaddps(diff_t_0_1, zTri, zMin0);                                        // diff_t_0_1 = zTri + tile.zMin[0]
 		X86Ymm fullyCoveredLane = ra.newYmm("fullyCoveredLane");
-		cc.vpcmpeqd(fullyCoveredLane, maskedCoverage, C_onebits);                  // maskedCoverage == ~0
-		X86Ymm zMin1 = ra.newYmm("zMin1");
-		cc.vmovaps(zMin1, zMinPtr[1]);
+		cc.vpcmpeqd(fullyCoveredLane, maskedCoverage, consts.simd_i_not_0);        // maskedCoverage == ~0
 		cc.vfmsub231ps(diff_t_0_1, zMin1, consts.simd_f_2_0);                      // diff_t_0_1 = tile.zMin1*2.0f - diff_t_0_1
 		cc.vpsrad(diff_t_0_1, diff_t_0_1, 31);                                     // diff_t_0_1 >>=  31
 		ra.free(fullyCoveredLane);
@@ -617,7 +621,7 @@ public:
 		
 		// Update the zMask
 		X86Ymm zMaskFull = ra.newYmm("zMaskFull");
-		cc.vpcmpeqd(zMaskFull, zMask, C_onebits);                                  // zMaskFull = zMask == ~0 ? ~0 : 0
+		cc.vpcmpeqd(zMaskFull, zMask, consts.simd_i_not_0);                        // zMaskFull = zMask == ~0 ? ~0 : 0
 		cc.vpandn(zMask, zMaskFull, zMask);                                        // zMask = ~zMaskFull & zMask
 		ra.free(zMask);
 		cc.vmovaps(zMaskPtr, zMask);
@@ -636,10 +640,10 @@ public:
 		X86Ymm z1tMin = ra.newYmm("z1tMin");
 		cc.vminps(z1tMin, opA, opB);                                               // z1tMin = min(opA, opB)
 		cc.vblendvps(zMin1, z1tMin, consts.simd_f_flt_max, zMaskFull);             // zMin1 = maskFull & 0x80000000 ? z1tMin : zMin1
+		ra.free(zMin1);
+		cc.vmovaps(zMinPtr[1], zMin1);
 
 		// Propagate zMin[1] back to zMin[0] if tile was fully covered, and update the mask
-		X86Ymm zMin0 = ra.newYmm("zMin0");
-		cc.vmovaps(zMin0, zMinPtr[0]);
 		ra.free(z1tMin);
 		ra.free(zMaskFull);
 		cc.vblendvps(zMin0, zMin0, z1tMin, zMaskFull);                             // zMin0 = zMaskFull & 0x80000000 ? z1tMin : zMin0
@@ -647,8 +651,6 @@ public:
 		// Write data back to tile
 		ra.free(zMin0);
 		cc.vmovaps(zMinPtr[0], zMin0);
-		ra.free(zMin1);
-		cc.vmovaps(zMinPtr[1], zMin1);
 	}
 
 	void ASM_ComputeBoundingBox(
@@ -890,10 +892,8 @@ public:
 		// TODO
 #endif
 
-		X86Ymm C_zerobits = ra.newYmm("ASM_TraverseTile::C_zerobits");
-		cc.vpxor(C_zerobits, x86::ymm0, x86::ymm0);                                             // amjit bug workaround: cc.vpxor(C_zerobits, C_zerobits, C_zerobits) breaks register allocator
 		X86Ymm C_onebits = ra.newYmm("ASM_TraverseTile::C_onebits");
-		cc.vpcmpeqd(C_onebits, x86::ymm0, x86::ymm0);                                           // amjit bug workaround: cc.vpcmpeqd(C_onebits, C_onebits, C_onebits) breaks register allocator
+		cc.vpcmpeqd(C_onebits, C_onebits, C_onebits);
 
 		X86Ymm zDistTriMin = ra.newYmm("zDistTriMin");
 		if (!TEST_Z)
@@ -929,6 +929,8 @@ public:
 			ra.free(rastMask32x1);
 			cc.vpshufb(rastMask8x4, rastMask32x1, consts.simd_i_shuffle_scanlines_to_subtiles); // rastMask8x4 = shuffle_epi8(rastMask32x1, shuffleScanlinesToSubtiles)
 
+			ra.free(C_onebits);
+
 			// Perform conservative texture lookup for alpha tested triangles
 			//if (TEXTURE_COORDINATES)
 			//	rastMask8x4 = TextureAlphaTest(tileIdx, rastMask8x4, dist0, texInterpolants, texture);
@@ -938,7 +940,7 @@ public:
 				
 				X86Ymm deadLane = ra.newYmm("deadLane");
 				ra.free(rastMask8x4);
-				cc.vpcmpeqd(deadLane, rastMask8x4, C_zerobits);                                 // deadLane = rastMask8x4 == 0 ? ~0 : 0
+				cc.vpcmpeqd(deadLane, rastMask8x4, consts.simd_i_0);                            // deadLane = rastMask8x4 == 0 ? ~0 : 0
 				X86Ymm zSubtileMax = ra.newYmm("zSubtileMax");
 				cc.vminps(zSubtileMax, z0, zTriMax);                                            // zSubtileMax = min(z0, zTriMax)
 				X86Ymm zPass = ra.newYmm("zPass");
@@ -964,7 +966,7 @@ public:
 
 				// Perform update heuristic
 #if QUICK_MASK != 0
-				ASM_UpdateTileQuick(cc, ra, consts, C_zerobits, C_onebits, tileAddr, rastMask8x4, zTriSubtile);
+				ASM_UpdateTileQuick(cc, ra, consts, tileAddr, rastMask8x4, zTriSubtile);
 #else
 				ASM_UpdateTileAccurate(cc, ra, consts, tileAddr, rastMask8x4, zTriSubtile);
 #endif
@@ -975,8 +977,6 @@ public:
 		}
 		cc.bind(L_TileCompleted);                                                               // }
 
-		ra.free(C_zerobits);
-		ra.free(C_onebits);
 	}
 
 	void ASM_TraverseScanline(
@@ -1296,8 +1296,6 @@ public:
 			}
 		}
 
-		//cc.int3();
-
 		cc.cmp(tileRowAddr, tileMidRowAddr);                                                              // if (tileRowIdx > tileMidRowIdx)
 		cc.jg(L_FlatTriangle);                                                                            //      goto L_FlatTriangle
 		{
@@ -1312,7 +1310,7 @@ public:
 
 			// Traverse middle scanline
 			cc.cmp(tileRowAddr, tileEndRowAddr);                                                          // if (tileRowAddr >= tileEndRowAddr)
-			cc.jg(L_TriangleExit);                                                                        //     goto L_TriangleExit
+			cc.jge(L_TriangleExit);                                                                       //     goto L_TriangleExit
 			{
 				if (TIGHT_TRAVERSAL)
 				{
@@ -1363,7 +1361,7 @@ public:
 
 			// Traverse top segment
 			cc.cmp(tileRowAddr, tileEndRowAddr);                                                          // if (tileRowAddr >= tileEndRowAddr)
-			cc.jg(L_TriangleExit);                                                                        //     goto L_TriangleExit
+			cc.jge(L_TriangleExit);                                                                       //     goto L_TriangleExit
 			{
 				// Defered update, moving down 1 scanline from the middle scanline
 				cc.vaddps(z0, z0, zTileDy);                                                               // z0 += tileY
@@ -2061,18 +2059,19 @@ public:
 			{
 //#if PRECISE_COVERAGE != 0
 //#else
-//				Label L_else = cc.newLabel();
-//				Label L_exit = cc.newLabel();
-//				cc.cmp(triMidVtxLeft, 0);
-//				cc.jne(L_else);
-//				{
-//					ASM_RasterizeTriangle(cc, TEST_Z, 0, 0, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slope, Mem_slopeTileDelta, zTriMin, zTriMax, zTri0, zTriTileDx, zTriTileDy);
-//				}
-//				cc.bind(L_else);
-//				{
-//					ASM_RasterizeTriangle(cc, TEST_Z, 0, 1, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slope, Mem_slopeTileDelta, zTriMin, zTriMax, zTri0, zTriTileDx, zTriTileDy);
-//				}
-//				cc.bind(L_exit);
+				Label L_else = cc.newLabel();
+				Label L_exit = cc.newLabel();
+				cc.cmp(triMidVtxLeft, 0);
+				cc.jne(L_else);  // Mid vtx is on the left
+				{
+					ASM_RasterizeTriangle(cc, ra, TEST_Z, 0, 0, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, Mem_tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slopeFP, Mem_slopeTileDelta, Mem_triSlopeTileDelta, Mem_zTriMin, Mem_zTriMax, zTri0, Mem_zTriTileDx, Mem_zTriTileDy);
+					cc.jmp(L_exit);
+				}
+				cc.bind(L_else); // Mid vtx is on the right
+				{
+					ASM_RasterizeTriangle(cc, ra, TEST_Z, 0, 1, L_VisibleExit, consts, triIdx, bbWidth, tileRowAddr, Mem_tileMidRowAddr, tileEndRowAddr, Mem_eventStart, Mem_slopeFP, Mem_slopeTileDelta, Mem_triSlopeTileDelta, Mem_zTriMin, Mem_zTriMax, zTri0, Mem_zTriTileDx, Mem_zTriTileDy);
+				}
+				cc.bind(L_exit);
 //#endif
 			}
 			cc.bind(L_EndSmallTriangle);
@@ -2082,7 +2081,7 @@ public:
 			ra.free(tileRowAddr);
 			ra.free(zTri0);
 			ra.free(triIdx);
-
+			cc.jmp(L_TriLoopStart);
 		}
 		cc.bind(L_TriLoopExit);
 		ra.free(triMask);
@@ -3190,10 +3189,6 @@ public:
 		for (int i = 0; i < NLEFT; ++i)
 			left[i] = _mmw_max_epi32(_mmw_sub_epi32(_mmw_srai_epi32(events[leftEvent - i], FP_BITS), _mmw_set1_epi32(eventOffset)), SIMD_BITS_ZERO);
 
-		printf("R0: %d, %d, %d, %d, %d, %d, %d, %d\n", simd_i32(right[0])[0], simd_i32(right[0])[1], simd_i32(right[0])[2], simd_i32(right[0])[3], simd_i32(right[0])[4], simd_i32(right[0])[5], simd_i32(right[0])[6], simd_i32(right[0])[7]);
-		printf("L0: %d, %d, %d, %d, %d, %d, %d, %d\n", simd_i32(left[0])[0], simd_i32(left[0])[1], simd_i32(left[0])[2], simd_i32(left[0])[3], simd_i32(left[0])[4], simd_i32(left[0])[5], simd_i32(left[0])[6], simd_i32(left[0])[7]);
-		exit(1);
-
 		__mw z0 = _mmw_add_ps(iz0, _mmw_set1_ps(zx*leftOffset));
 		int tileIdxEnd = tileIdx + rightOffset;
 		tileIdx += leftOffset;
@@ -3367,8 +3362,6 @@ public:
 			else
 				topEvent = simd_i32(eventStart[1])[triIdx] + min(0, topDelta);
 		}
-
-		printf("%d, %d, %d - %d, %d, %d\n", startEvent, endEvent, topEvent, startDelta, endDelta, topDelta);
 
 		if (tileRowIdx <= tileMidRowIdx)
 		{
@@ -3789,8 +3782,6 @@ public:
 			int tileRowIdx = simd_i32(bbBottomIdx)[triIdx];
 			int tileMidRowIdx = simd_i32(bbMidIdx)[triIdx];
 			int tileEndRowIdx = simd_i32(bbTopIdx)[triIdx];
-
-			printf("%d x %d: %d, %d, %d\n", bbWidth, bbHeight, tileRowIdx, tileMidRowIdx, tileEndRowIdx);
 
 			// Setup texture (u,v) interpolation parameters, TODO: Simdify
 			TextureInterpolants texInterpolants;

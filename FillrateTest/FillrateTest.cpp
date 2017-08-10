@@ -377,7 +377,7 @@ int main(int argc, char* argv[])
 	//const int numTriangles[] = { 4096 * 1024, 4096 * 1024, 4096 * 1024, 2048 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024 };
 	//const int sizes[] = { 10, 25, 50, 75, 100, 250, 500 };
 
-	const int numTriangles[] = { 64*1024 };
+	const int numTriangles[] = { 1024*1024 };
 	const int sizes[] = { 250 };
 
 	int numSizes = sizeof(sizes) / sizeof(int);
@@ -417,29 +417,29 @@ int main(int argc, char* argv[])
 //	}
 //#endif
 //
-	//printf("\n\nMasked single threaded\n");
-	//printf("----\n");
-	//for (int i = 0; i < numSizes; ++i)
-	//{
-	//	int size = sizes[i];
-	//	double t = BenchmarkTriangles(verts[i], trisBtF[i], numTriangles[i], moc);
-	//	double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
-	//	double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
-	//	printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
-	//}
-
-	MaskedOcclusionTexture *texture = CreateCircleTexture();
-
-	printf("\n\nMasked single threaded - TEXTURED\n");
+	printf("\n\nMasked single threaded\n");
 	printf("----\n");
 	for (int i = 0; i < numSizes; ++i)
 	{
 		int size = sizes[i];
-		double t = BenchmarkTexturedTriangles(texVerts[i], trisBtF[i], numTriangles[i], moc, texture);
+		double t = BenchmarkTriangles(verts[i], trisBtF[i], numTriangles[i], moc);
 		double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
 		double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
 		printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
 	}
+
+	//MaskedOcclusionTexture *texture = CreateCircleTexture();
+
+	//printf("\n\nMasked single threaded - TEXTURED\n");
+	//printf("----\n");
+	//for (int i = 0; i < numSizes; ++i)
+	//{
+	//	int size = sizes[i];
+	//	double t = BenchmarkTexturedTriangles(texVerts[i], trisBtF[i], numTriangles[i], moc, texture);
+	//	double GPixelsPerSecond = (double)numTriangles[i] * size*size / (2.0 * 1e9 * t);
+	//	double MTrisPerSecond = (double)numTriangles[i] / (1e6 * t);
+	//	printf("Tri: %3dx%3d - Time: %7.2f ms, MTris/s: %6.2f GPixels/s: %5.2f \n", size, size, t * 1000.0f, MTrisPerSecond, GPixelsPerSecond);
+	//}
 
 	//int numThreads = std::thread::hardware_concurrency() - 1;
 	//printf("\n\nMasked multi threaded (%d threads)\n", numThreads);
