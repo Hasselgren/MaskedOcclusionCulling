@@ -640,8 +640,6 @@ public:
 		X86Ymm z1tMin = ra.newYmm("z1tMin");
 		cc.vminps(z1tMin, opA, opB);                                               // z1tMin = min(opA, opB)
 		cc.vblendvps(zMin1, z1tMin, consts.simd_f_flt_max, zMaskFull);             // zMin1 = maskFull & 0x80000000 ? z1tMin : zMin1
-		ra.free(zMin1);
-		cc.vmovaps(zMinPtr[1], zMin1);
 
 		// Propagate zMin[1] back to zMin[0] if tile was fully covered, and update the mask
 		ra.free(z1tMin);
@@ -649,6 +647,8 @@ public:
 		cc.vblendvps(zMin0, zMin0, z1tMin, zMaskFull);                             // zMin0 = zMaskFull & 0x80000000 ? z1tMin : zMin0
 
 		// Write data back to tile
+		ra.free(zMin1);
+		cc.vmovaps(zMinPtr[1], zMin1);
 		ra.free(zMin0);
 		cc.vmovaps(zMinPtr[0], zMin0);
 	}
