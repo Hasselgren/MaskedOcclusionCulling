@@ -172,9 +172,9 @@ public:
 	JitRuntime      mRuntime;
 
 	// Asmjit callout function(s)
-	typedef int(*ASM_RasterizeTriangleBatchFN)(MaskedOcclusionCullingPrivate *, __mwi*, __mwi*, __mw*, __mw*, __mw*, __mw*, __mw*, int, ScissorRect *);
+	typedef int(*ASM_RenderTrianglesFN)(MaskedOcclusionCullingPrivate *, const float*, const unsigned int*, int, const float*, int, int, const VertexLayout*);
 
-	ASM_RasterizeTriangleBatchFN mASMRasterizeTriangleBatch;
+	ASM_RenderTrianglesFN mASMRenderTriangles;
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructors and state handling
@@ -285,6 +285,20 @@ public:
 			std::string  mName;
 		};
 
+		struct RegisterState
+		{
+			Register     mGpRegs[16];
+			Register     mYmmRegs[16];
+
+			RegisterState()
+			{
+				for (int i = 0; i < 16; ++i)
+					mGpRegs[i].mUsed = false;
+				for (int i = 0; i < 16; ++i)
+					mYmmRegs[i].mUsed = false;
+			}
+		};
+
 		struct StackEntry
 		{
 			unsigned int mOffset;
@@ -295,8 +309,7 @@ public:
 
 		X86Compiler                  &mcc;
 
-		Register                     mGpRegs[16];
-		Register                     mYmmRegs[16];
+		std::vector<RegisterState>   mRegisterState;
 
 		std::vector<StackEntry>      mStack;
 		unsigned int                 mStackPtr;
@@ -304,25 +317,17 @@ public:
 
 		ASM_RegAllocator(X86Compiler &cc) : mcc(cc)
 		{
-			wipeRegs();
+			mRegisterState.resize(1);   // Global register scope
 			mStackPtr = STACK_PROLOGUE; // Allocate prologue
-		}
-
-		void wipeRegs()
-		{
-			for (int i = 0; i < 16; ++i)
-				mGpRegs[i].mUsed = false;
-			for (int i = 0; i < 16; ++i)
-				mYmmRegs[i].mUsed = false;
 		}
 
 		void printStats(const char *name)
 		{
 			int gpUsed = 0, ymmUsed = 0;
 			for (int i = 0; i < 16; ++i)
-				if (mGpRegs[i].mUsed) gpUsed++;
+				if (mRegisterState[mRegisterState.size() - 1].mGpRegs[i].mUsed) gpUsed++;
 			for (int i = 0; i < 16; ++i)
-				if (mYmmRegs[i].mUsed) ymmUsed++;
+				if (mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mUsed) ymmUsed++;
 			printf("%32s: %2d/15 GP, %2d/16 Ymm\n", name, gpUsed, ymmUsed);
 		}
 
@@ -332,12 +337,12 @@ public:
 			printf("---------------\n");
 			printf("GP:\n");
 			for (int i = 0; i < 16; ++i)
-				if (mGpRegs[i].mUsed)
-					printf("    r%2d: %s\n", i, mGpRegs[i].mName.c_str());
+				if (mRegisterState[mRegisterState.size() - 1].mGpRegs[i].mUsed)
+					printf("    r%2d: %s\n", i, mRegisterState[mRegisterState.size() - 1].mGpRegs[i].mName.c_str());
 			printf("YMM:\n");
 			for (int i = 0; i < 16; ++i)
-				if (mYmmRegs[i].mUsed)
-					printf("    r%2d: %s\n", i, mYmmRegs[i].mName.c_str());
+				if (mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mUsed)
+					printf("    r%2d: %s\n", i, mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mName.c_str());
 		}
 
 		int alignPtr(int ptr, int align) 
@@ -357,9 +362,9 @@ public:
 
 		X86Gp getI64(const X86Gp &reg, const char *name, int offset = -1)
 		{
-			assert(!mGpRegs[reg.getId()].mUsed); // Register was already taken :(
-			mGpRegs[reg.getId()].mUsed = true;
-			mGpRegs[reg.getId()].mName = copyName(name, offset);
+			assert(!mRegisterState[mRegisterState.size() - 1].mGpRegs[reg.getId()].mUsed); // Register was already taken :(
+			mRegisterState[mRegisterState.size() - 1].mGpRegs[reg.getId()].mUsed = true;
+			mRegisterState[mRegisterState.size() - 1].mGpRegs[reg.getId()].mName = copyName(name, offset);
 			return x86OpData.gpq[reg.getId()].r64();
 		}
 
@@ -372,18 +377,18 @@ public:
 		{
 			for (int i = 0; i < 16; ++i)
 			{
-				if (i != X86Gp::kIdSp && i != X86Gp::kIdCx && !mGpRegs[i].mUsed)
+				if (i != X86Gp::kIdSp && i != X86Gp::kIdCx && !mRegisterState[mRegisterState.size() - 1].mGpRegs[i].mUsed)
 				{
-					mGpRegs[i].mUsed = true;
-					mGpRegs[i].mName = copyName(name, offset);
+					mRegisterState[mRegisterState.size() - 1].mGpRegs[i].mUsed = true;
+					mRegisterState[mRegisterState.size() - 1].mGpRegs[i].mName = copyName(name, offset);
 					return x86OpData.gpq[i].r64();
 				}
 			}
 
-			if (!mGpRegs[X86Gp::kIdCx].mUsed)
+			if (!mRegisterState[mRegisterState.size() - 1].mGpRegs[X86Gp::kIdCx].mUsed)
 			{
-				mGpRegs[X86Gp::kIdCx].mUsed = true;
-				mGpRegs[X86Gp::kIdCx].mName = copyName(name, offset);
+				mRegisterState[mRegisterState.size() - 1].mGpRegs[X86Gp::kIdCx].mUsed = true;
+				mRegisterState[mRegisterState.size() - 1].mGpRegs[X86Gp::kIdCx].mName = copyName(name, offset);
 				return x86OpData.gpq[X86Gp::kIdCx].r64();
 			}
 
@@ -401,11 +406,11 @@ public:
 		{
 			for (int i = 0; i < 16; ++i)
 			{
-				if (!mYmmRegs[i].mUsed)
+				if (!mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mUsed)
 				{
 					assert(x86OpData.ymm[i].ymm().getId() == i);
-					mYmmRegs[i].mUsed = true;
-					mYmmRegs[i].mName = copyName(name, offset);
+					mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mUsed = true;
+					mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mName = copyName(name, offset);
 					return x86OpData.ymm[i].ymm();
 				}
 			}
@@ -416,28 +421,72 @@ public:
 
 		X86Xmm newXmm(const char *name, int offset = -1)
 		{
-			return newYmm(name, offset).xmm();
+			for (int i = 0; i < 16; ++i)
+			{
+				if (!mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mUsed)
+				{
+					assert(x86OpData.xmm[i].ymm().getId() == i);
+					mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mUsed = true;
+					mRegisterState[mRegisterState.size() - 1].mYmmRegs[i].mName = copyName(name, offset);
+					return x86OpData.xmm[i].xmm();
+				}
+			}
+			printLive();
+			assert(false); // Uh oh, ran out of registers. We don't do automatic spilling
+			return x86OpData.xmm[0].xmm();
+			//return newYmm(name, offset).xmm();
 		}
 
 		void free(const X86Gp &reg)
 		{
 			assert(reg.getId() >= X86Gp::kIdAx && reg.getId() <= X86Gp::kIdR15 && reg.getId() != X86Gp::kIdSp);
-			mGpRegs[reg.getId()].mUsed = false;
-			mGpRegs[reg.getId()].mName = "";
+			mRegisterState[mRegisterState.size() - 1].mGpRegs[reg.getId()].mUsed = false;
+			mRegisterState[mRegisterState.size() - 1].mGpRegs[reg.getId()].mName = "";
 		}
 
 		void free(const X86Xmm &reg)
 		{
 			assert(reg.getId() >= 0 && reg.getId() <= 15);
-			mYmmRegs[reg.getId()].mUsed = false;
-			mYmmRegs[reg.getId()].mName = "";
+			mRegisterState[mRegisterState.size() - 1].mYmmRegs[reg.getId()].mUsed = false;
+			mRegisterState[mRegisterState.size() - 1].mYmmRegs[reg.getId()].mName = "";
 		}
 
 		void free(const X86Ymm &reg)
 		{
 			assert(reg.getId() >= 0 && reg.getId() <= 15);
-			mYmmRegs[reg.getId()].mUsed = false;
-			mYmmRegs[reg.getId()].mName = "";
+			mRegisterState[mRegisterState.size() - 1].mYmmRegs[reg.getId()].mUsed = false;
+			mRegisterState[mRegisterState.size() - 1].mYmmRegs[reg.getId()].mName = "";
+		}
+
+		void pushRegContext()
+		{
+			mRegisterState.push_back(mRegisterState[mRegisterState.size() - 1]);
+		}
+
+		void popRegContext()
+		{
+			assert(mRegisterState.size() >= 2);
+			
+			// Make sure that we free'd all used registers
+			RegisterState &l = mRegisterState[mRegisterState.size() - 1];
+			RegisterState &p = mRegisterState[mRegisterState.size() - 2];
+		
+			for (int i = 0; i < 16; ++i)
+			{
+				if (l.mGpRegs[i].mUsed && !p.mGpRegs[i].mUsed)
+					printf("NOT FREED, r%2d: %s\n", i, l.mGpRegs[i].mName.c_str());
+				if (!l.mGpRegs[i].mUsed && p.mGpRegs[i].mUsed)
+					printf("Extra freed, r%2d: %s\n", i, l.mGpRegs[i].mName.c_str());
+			}
+			for (int i = 0; i < 16; ++i)
+			{
+				if (l.mYmmRegs[i].mUsed && !p.mYmmRegs[i].mUsed)
+					printf("NOT FREED, ymm%2d: %s\n", i, l.mYmmRegs[i].mName.c_str());
+				if (!l.mYmmRegs[i].mUsed && p.mYmmRegs[i].mUsed)
+					printf("Extra freed, ymm%2d: %s\n", i, l.mYmmRegs[i].mName.c_str());
+			}
+
+			mRegisterState.pop_back();
 		}
 
 		X86Mem newStack(unsigned int size, unsigned int align, const char *name)
@@ -446,7 +495,7 @@ public:
 			int insertPos = alignPtr(mStackPtr, align); // Make sure element is aligned
 			mStack.push_back(StackEntry(insertPos, name));
 			mStackPtr = insertPos + size;
-			return X86Mem(x86::rsp, insertPos);
+			return X86Mem(x86::rsp, insertPos, size);
 		}
 
 		void InitializeStack()
@@ -470,7 +519,9 @@ public:
 
 	struct ASM_RasterizerContext
 	{
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		// Compile time constants
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		X86Mem simd_i_0;
 		X86Mem simd_i_1;
 		X86Mem simd_i_not_0;
@@ -481,7 +532,7 @@ public:
 		X86Mem simd_i_lane_idx;
 		X86Mem simd_i_shuffle_scanlines_to_subtiles;
 		X86Mem simd_i_tri_idx_offset;
-		X86Mem simd_i_lane_mask[9];
+		X86Mem simd_i_lane_masks;
 
 		X86Mem simd_f_neg_0;
 		X86Mem simd_f_1_0;
@@ -496,7 +547,9 @@ public:
 		X86Mem simd_f_sub_tile_row_offset;
 		X86Mem simd_f_guardband;
 
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		// Runtime constants (pointer buffer resolution etc)
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		X86Mem simd_i_res_tiles_width;
 		X86Mem simd_f_horizontal_slope_delta;
 		X86Mem simd_f_neg_horizontal_slope_delta;
@@ -505,24 +558,41 @@ public:
 		X86Mem i64_msoc_ptr;
 		X86Mem i64_msoc_buffer_ptr;
 
-		// Runtime variables (stuff that doesn't fit in registers)
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		// Runtime variables (stored on stack, stuff that doesn't fit in registers)
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		
+		// Vertex position storage, first clip space, then projected screen space
 		X86Mem Mem_vtxX[3], Mem_vtxY[3], Mem_vtxW[3];
 
-		X86Mem Mem_zMin, Mem_zMax;
-		X86Mem Mem_zPlaneOffset, Mem_zPixelDx, Mem_zPixelDy;
+		// Z-plane interpolation coefficients for a simd batch of triangles
+		X86Mem Mem_zPlaneOffset, Mem_zPixelDx, Mem_zPixelDy, Mem_zMin, Mem_zMax;
 
+		// Bounding box sizes / scanline addresses
 		X86Mem Mem_bbTileSizeX, Mem_bbTileSizeY;
 		X86Mem Mem_bbBottomIdx, Mem_bbMidIdx, Mem_bbTopIdx;
 
-		X86Mem Mem_eventStart[3], Mem_slopeFP[3], Mem_slopeTileDelta[3];
-		X86Mem Mem_triSlopeTileDelta[3];
+		// Triangle event / edge slopes
+		X86Mem Mem_eventStart[3], Mem_slopeFP[3], Mem_slopeTileDelta[3], Mem_triSlopeTileDelta[3];
 
-		X86Mem Mem_zTriMin, Mem_zTriMax;
-		X86Mem Mem_zTriTileDx, Mem_zTriTileDy;
+		// Z-plane interpolation coefficients for a single triangle
+		X86Mem Mem_zTriMin, Mem_zTriMax, Mem_zTriTileDx, Mem_zTriTileDy;
 
+		// Buffer used to store clipped triangles that doesn't fit in the current simd-batch
 		X86Mem Mem_clipVtxBuffer;
+		X86Mem Mem_clipHead, Mem_clipTail;
 
-		X86Mem Mem_midVtxLeft, Mem_tileMidRowAddr;
+		// Scratchpad buffer used temporarily during clipping
+		X86Mem Mem_vtxBuf;
+
+		// Straddling masks for triangles in a simd-batch overlapping the different clip planes.
+		X86Mem Mem_straddleMask[5];
+
+		X86Mem Mem_midVtxLeft;
+		X86Mem Mem_tileMidRowAddr;
+
+		// Function input parameters stored on (spilled to) the stack
+		X86Mem Mem_inVtxPtr, Mem_inTrisPtr, Mem_nTris, Mem_modelToClipMatrixPtr, Mem_bfWinding, Mem_clipPlaneMask, Mem_vtxLayoutPtr;
 
 		template<class T> X86Mem ASM_newYmmConst(X86Compiler &cc, T val)
 		{
@@ -544,16 +614,6 @@ public:
 			simd_i_lane_idx = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(0, 1, 2, 3, 4, 5, 6, 7));
 			simd_i_shuffle_scanlines_to_subtiles = cc.newYmmConst(kConstScopeGlobal, Data256::fromI8(0x0, 0x4, 0x8, 0xC, 0x1, 0x5, 0x9, 0xD, 0x2, 0x6, 0xA, 0xE, 0x3, 0x7, 0xB, 0xF, 0x0, 0x4, 0x8, 0xC, 0x1, 0x5, 0x9, 0xD, 0x2, 0x6, 0xA, 0xE, 0x3, 0x7, 0xB, 0xF));
 			simd_i_tri_idx_offset = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(0, 3, 6, 9, 12, 15, 18, 21));
-
-			simd_i_lane_mask[0] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32( 0, 0, 0, 0, 0, 0, 0, 0));
-			simd_i_lane_mask[1] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0, 0, 0, 0, 0, 0, 0, 0));
-			simd_i_lane_mask[2] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0,~0, 0, 0, 0, 0, 0, 0));
-			simd_i_lane_mask[3] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0,~0,~0, 0, 0, 0, 0, 0));
-			simd_i_lane_mask[4] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0,~0,~0,~0, 0, 0, 0, 0));
-			simd_i_lane_mask[5] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0,~0,~0,~0,~0, 0, 0, 0));
-			simd_i_lane_mask[6] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0,~0,~0,~0,~0,~0, 0, 0));
-			simd_i_lane_mask[7] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0,~0,~0,~0,~0,~0,~0, 0));
-			simd_i_lane_mask[8] = cc.newYmmConst(kConstScopeGlobal, Data256::fromI32(~0,~0,~0,~0,~0,~0,~0,~0));
 
 			// Create SIMD fp32 constants
 			simd_f_neg_0 = cc.newYmmConst(kConstScopeGlobal, Data256::fromF32(-0.0f));
@@ -613,11 +673,35 @@ public:
 			Mem_zTriTileDy = ra.newStack(sizeof(__mw), sizeof(__mw), "Mem_zTriTileDy");
 
 			Mem_clipVtxBuffer = ra.newStack(sizeof(__m128)*MAX_CLIPPED * 3, sizeof(__m128), "Mem_clipVtxBuffer");
+			Mem_clipHead = ra.newStack(sizeof(int), sizeof(int), "Mem_clipHead");
+			Mem_clipTail = ra.newStack(sizeof(int), sizeof(int), "Mem_clipTail");
+
+			Mem_vtxBuf = ra.newStack(sizeof(__m128) * 2 * 8, sizeof(__m128), "Mem_vtxBuf");
 
 			Mem_midVtxLeft = ra.newStack(sizeof(int), sizeof(int), "Mem_midVtxLeft");
 			Mem_tileMidRowAddr = ra.newStack(sizeof(void*), sizeof(void*), "Mem_tileMidRowAddr");
+
+			for (int i = 0; i < 5; ++i)
+				Mem_straddleMask[i] = ra.newStack(sizeof(int), sizeof(int), "Mem_straddleMask[i]");
+
+			Mem_inVtxPtr = ra.newStack(sizeof(void*), sizeof(void*), "Mem_inVtxPtr");
+			Mem_inTrisPtr = ra.newStack(sizeof(void*), sizeof(void*), "Mem_inTrisPtr");
+			Mem_nTris = ra.newStack(sizeof(int), sizeof(int), "Mem_nTris");
+			Mem_modelToClipMatrixPtr = ra.newStack(sizeof(void*), sizeof(void*), "Mem_modelToClipMatrixPtr");
+			Mem_bfWinding = ra.newStack(sizeof(int), sizeof(int), "Mem_bfWinding");
+			Mem_clipPlaneMask = ra.newStack(sizeof(int), sizeof(int), "Mem_clipPlaneMask");
+			Mem_vtxLayoutPtr = ra.newStack(sizeof(void*), sizeof(void*), "Mem_vtxLayoutPtr");
 		}
 	};
+
+	X86Mem ASM_MemAdjust(X86Mem &mem, X86Gp &idxReg, int shift, int offset)
+	{
+		assert(mem.hasBase() && !mem.hasIndex());
+		X86Mem newMem = mem.adjusted(offset);
+		newMem.setIndex(idxReg);
+		newMem.setShift(shift);
+		return newMem;
+	}
 
 	void ASM_set1(X86Compiler &cc, X86Ymm &dst, const X86Gp &src)
 	{
@@ -697,7 +781,7 @@ public:
 		cc.vpcmpeqd(zMaskFull, zMask, context.simd_i_not_0);                       // zMaskFull = zMask == ~0 ? ~0 : 0
 		cc.vpandn(zMask, zMaskFull, zMask);                                        // zMask = ~zMaskFull & zMask
 		ra.free(zMask);
-		cc.vmovaps(zMaskPtr, zMask);
+		cc.vmovdqa(zMaskPtr, zMask);
 
 		// Compute new value for zMin[1]. This has one of four outcomes: zMin[1] = min(zMin[1], zTriv),  zMin[1] = zTriv,
 		// zMin[1] = FLT_MAX or unchanged, depending on if the layer is updated, discarded, fully covered, or not updated
@@ -869,6 +953,8 @@ public:
 		X86Mem *pVtxXMem,
 		X86Mem *pVtxYMem)
 	{
+		ra.pushRegContext();
+
 #ifdef _DEBUG
 		X86Gp _debug_name = ra.newI32("ASM_SortVertices");
 		cc.mov(_debug_name, 0xDEADC0DE);
@@ -925,6 +1011,8 @@ public:
 			ra.free(pVtxY[i]);
 			cc.vmovaps(pVtxYMem[i], pVtxY[i]);
 		}
+
+		ra.popRegContext();
 	}
 
 	void ASM_TraverseTile(
@@ -940,6 +1028,8 @@ public:
 		X86Ymm *right,
 		const X86Ymm &z0)
 	{
+		ra.pushRegContext();
+
 #ifdef _DEBUG
 		X86Gp _debug_name = ra.newI32("ASM_TraverseTile");
 		cc.mov(_debug_name, 0xDEADC0DE);
@@ -1047,6 +1137,7 @@ public:
 		}
 		cc.bind(L_TileCompleted);                                                               // }
 
+		ra.popRegContext();
 	}
 
 	void ASM_TraverseScanline(
@@ -1065,6 +1156,8 @@ public:
 		const X86Ymm *events,
 		const X86Ymm &z0)
 	{
+		ra.pushRegContext();
+
 #ifdef _DEBUG
 		X86Gp _debug_name = ra.newI32("ASM_TraverseScanline");
 		cc.mov(_debug_name, 0xDEADC0DE);
@@ -1158,6 +1251,7 @@ public:
 		ra.free(tileAddr);
 		ra.free(tileAddrEnd);
 		ra.free(vLeftOffsetZ0);
+		ra.popRegContext();
 	}
 
 	void ASM_RasterizeTriangleSegment(
@@ -1177,6 +1271,8 @@ public:
 		X86Ymm *triEvent,
 		X86Ymm &z0)
 	{
+		ra.pushRegContext();
+
 #ifdef _DEBUG
 		X86Gp _debug_name = ra.newI32("ASM_RasterizeTriangleSegment");
 		cc.mov(_debug_name, 0xDEADC0DE);
@@ -1261,6 +1357,8 @@ public:
 			cc.jmp(L_LoopStart);
 		}
 		cc.bind(L_LoopExit);
+
+		ra.popRegContext();
 	}
 
 	void ASM_RasterizeTriangle(
@@ -1277,6 +1375,8 @@ public:
 		X86Gp &tileEndRowAddr,
 		X86Ymm &z0) 
 	{
+		ra.pushRegContext();
+
 #ifdef _DEBUG
 		X86Gp _debug_name = ra.newI32("ASM_RasterizeTriangle");
 		cc.mov(_debug_name, 0xDEADC0DE);
@@ -1446,97 +1546,38 @@ public:
 			if (TIGHT_TRAVERSAL)
 				ra.free(tileEvent[i]);
 		}
+
+		ra.popRegContext();
 	}
 
 	void ASM_RasterizeTriangleBatch(
 		X86Compiler &cc,
 		ASM_RegAllocator &ra,
+		ASM_RasterizerContext &context,
 		int TEST_Z,
-		X86Gp &msocPtr,
-		X86Gp &ipVtxXPtr,
-		X86Gp &ipVtxYPtr,
-		X86Gp &pVtxXPtr,
-		X86Gp &pVtxYPtr,
-		X86Gp &pVtxZPtr,
-		X86Gp &pVtxUPtr,
-		X86Gp &pVtxVPtr,
+		Label L_VisibleExit,
+		X86Mem *pVtxX,
+		X86Mem *pVtxY,
+		X86Mem *pVtxZ,
 		X86Gp &triMask,
 		const X86Gp &scissorPtr)
 	{
-		ra.free(ipVtxXPtr);
-		ra.free(ipVtxYPtr);
-		ra.free(pVtxUPtr);
-		ra.free(pVtxVPtr);
-
-		Label L_VisibleExit = cc.newLabel();
-		Label L_ViewCulledExit = cc.newLabel();
-		Label L_Exit = cc.newLabel();
-
 		Label L_TriLoopStart = cc.newLabel();
 		Label L_SmallTriangle = cc.newLabel();
 		Label L_EndSmallTriangle = cc.newLabel();
 		Label L_TriLoopExit = cc.newLabel();
 
-		ASM_RasterizerContext context(cc, ra);
-
-		ra.InitializeStack();
-
-		//////////////////////////////////////////////////////////////////////////////
-		// Set up run-time constants
-		//////////////////////////////////////////////////////////////////////////////
-
-		{
-			// Set up msoc object pointer
-			cc.mov(context.i64_msoc_ptr, msocPtr);
-
-			// Set up i_res_tiles_width
-			X86Gp i64_tiles_width = ra.newI64("i64_tiles_width"); 
-			X86Gp i64_scanline_step = ra.newI64("i64_scanline_step");
-			cc.xor_(i64_tiles_width, i64_tiles_width);
-			cc.mov(i64_tiles_width.r32(), x86::dword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mTilesWidth)));
-			cc.mov(i64_scanline_step, i64_tiles_width);
-			cc.imul(i64_scanline_step, sizeof(ZTile));
-			ra.free(i64_scanline_step);
-			cc.mov(context.i64_scanline_step, i64_scanline_step);
-
-			// Set up buffer pointer
-			X86Gp i64_msoc_buffer_ptr = ra.newI64("i64_msoc_buffer_ptr");
-			cc.mov(i64_msoc_buffer_ptr, x86::qword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mMaskedHiZBuffer)));
-			ra.free(i64_msoc_buffer_ptr);
-			cc.mov(context.i64_msoc_buffer_ptr, i64_msoc_buffer_ptr);
-
-			// Set up simd_i_res_tiles_width
-			X86Ymm tmp = ra.newYmm("tmp");
-			ASM_set1(cc, tmp, i64_tiles_width.r32());
-			ra.free(i64_tiles_width);
-			cc.vmovdqa(context.simd_i_res_tiles_width, tmp);
-
-			// Set up C_horizontalSlopeDelta and C_negHorizontalSlopeDelta
-			X86Gp i32_width = ra.newI32("i32_width");
-			ra.free(msocPtr);
-			cc.mov(i32_width, x86::dword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mWidth)));
-			ASM_set1(cc, tmp, i32_width);
-			ra.free(i32_width);
-			cc.vcvtdq2ps(tmp, tmp);
-			cc.vaddps(tmp, tmp, context.simd_f_guardband);
-			cc.vmovdqa(context.simd_f_horizontal_slope_delta, tmp);
-
-			cc.vxorps(tmp, tmp, context.simd_f_neg_0);
-			ra.free(tmp);
-			cc.vmovdqa(context.simd_f_neg_horizontal_slope_delta, tmp);
-		}
-
 		//////////////////////////////////////////////////////////////////////////////
 		// Set up pointers to vtx data
 		//////////////////////////////////////////////////////////////////////////////
 
-		X86Mem pVtxX[3], pVtxY[3], pVtxZ[3];
-		for (int i = 0; i < 3; ++i)
-		{
-			pVtxX[i] = x86::yword_ptr(pVtxXPtr, i * sizeof(__mw));
-			pVtxY[i] = x86::yword_ptr(pVtxYPtr, i * sizeof(__mw));
-			pVtxZ[i] = x86::yword_ptr(pVtxZPtr, i * sizeof(__mw));
-		}
+		//X86Mem pVtxX[3], pVtxY[3], pVtxZ[3];
+		//for (int i = 0; i < 3; ++i)
+		//{
+		//	pVtxX[i] = x86::yword_ptr(pVtxXPtr, i * sizeof(__mw));
+		//	pVtxY[i] = x86::yword_ptr(pVtxYPtr, i * sizeof(__mw));
+		//	pVtxZ[i] = x86::yword_ptr(pVtxZPtr, i * sizeof(__mw));
+		//}
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Compute bounding box and clamp to tile coordinates
@@ -1587,7 +1628,7 @@ public:
 			cc.not_(bbAreaMask);                                                // bbAreaMask = ~bbAreaMask
 			ra.free(bbAreaMask);
 			cc.and_(triMask, bbAreaMask);                                       // triMask &= bbAreaMask
-			cc.jz(L_ViewCulledExit);
+			cc.jz(L_TriLoopExit); // TODO: Need to set sticy view-culled
 
 
 			//////////////////////////////////////////////////////////////////////////////
@@ -1606,13 +1647,13 @@ public:
 
 			// Move indices to stack so we can access individual lanes
 			ra.free(bbBottomIdx);
-			cc.vmovaps(context.Mem_bbBottomIdx, bbBottomIdx);
+			cc.vmovdqa(context.Mem_bbBottomIdx, bbBottomIdx);
 			ra.free(bbTopIdx);
-			cc.vmovaps(context.Mem_bbTopIdx, bbTopIdx);
+			cc.vmovdqa(context.Mem_bbTopIdx, bbTopIdx);
 			ra.free(bbTileSizeX);
-			cc.vmovaps(context.Mem_bbTileSizeX, bbTileSizeX);
+			cc.vmovdqa(context.Mem_bbTileSizeX, bbTileSizeX);
 			ra.free(bbTileSizeY);
-			cc.vmovaps(context.Mem_bbTileSizeY, bbTileSizeY);
+			cc.vmovdqa(context.Mem_bbTileSizeY, bbTileSizeY);
 
 		}
 
@@ -1846,9 +1887,9 @@ public:
 			{
 				X86Ymm slopeTileDelta = ra.newYmm("slopeTileDelta");
 				cc.vpslld(slopeTileDelta, slopeFP[i], TILE_HEIGHT_SHIFT);       // slopeTileDelta[i] = slopeFP[i] << TILE_HEIGHT_SHIFT
-				cc.vmovaps(context.Mem_slopeFP[i], slopeFP[i]);
+				cc.vmovdqa(context.Mem_slopeFP[i], slopeFP[i]);
 				ra.free(slopeTileDelta);
-				cc.vmovaps(context.Mem_slopeTileDelta[i], slopeTileDelta);
+				cc.vmovdqa(context.Mem_slopeTileDelta[i], slopeTileDelta);
 			}
 
 			// Compute edge events for the bottom of the bounding box, or for the middle tile in case of
@@ -1885,7 +1926,7 @@ public:
 				cc.vpmulld(eventStart, slopeFP[i], yDiffi[i & 1]);              // eventStart = slopeFP[i] * yDiffi[i & 1]
 				cc.vpsubd(eventStart, xDiffi[i & 1], eventStart);               // eventStart = xDiffi[i & 1] - eventStart
 				ra.free(eventStart);
-				cc.vmovaps(context.Mem_eventStart[i], eventStart);
+				cc.vmovdqa(context.Mem_eventStart[i], eventStart);
 			}
 			ra.free(xDiffi[0]);
 			ra.free(xDiffi[1]);
@@ -1906,12 +1947,12 @@ public:
 
 			// Move indices to stack so we can access individual lanes
 			ra.free(bbMidIdx);
-			cc.vmovaps(context.Mem_bbMidIdx, bbMidIdx);
+			cc.vmovdqa(context.Mem_bbMidIdx, bbMidIdx);
 		}
 
-		ra.free(pVtxXPtr);
-		ra.free(pVtxYPtr);
-		ra.free(pVtxZPtr);
+		//ra.free(pVtxXPtr);
+		//ra.free(pVtxYPtr);
+		//ra.free(pVtxZPtr);
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Loop over non-culled triangle and change SIMD axis to per-pixel
@@ -1992,7 +2033,7 @@ public:
 				X86Ymm triSlopeTileDelta = ra.newYmm("triSlopeTileDelta");
 				ASM_set1(cc, triSlopeTileDelta, context.Mem_slopeTileDelta[i]);             // triSlopeTileDelta = _mmw_set1_epi32(slopeTileDelta[i].m_i32[triIdx]);
 				ra.free(triSlopeTileDelta);
-				cc.vmovaps(context.Mem_triSlopeTileDelta[i], triSlopeTileDelta);            // constant per triangle, so spill to stack
+				cc.vmovdqa(context.Mem_triSlopeTileDelta[i], triSlopeTileDelta);            // constant per triangle, so spill to stack
 			}
 
 			// Get dimension of bounding box bottom, mid & top segments
@@ -2101,25 +2142,6 @@ public:
 		}
 		cc.bind(L_TriLoopExit);
 		ra.free(triMask);
-
-		// Went through the whole loop, means everytrhing was occluded (if we're testing)
-		cc.mov(x86::rax, TEST_Z ? OCCLUDED : VISIBLE);
-		cc.jmp(L_Exit);
-
-		// Everything was view culled
-		cc.bind(L_ViewCulledExit);
-		cc.mov(x86::rax, VIEW_CULLED);
-
-		// Early exit for when using TestZ
-		if (TEST_Z)
-		{
-			cc.jmp(L_Exit);
-			cc.bind(L_VisibleExit);
-			cc.mov(x86::rax, VISIBLE);
-		}
-		cc.bind(L_Exit);
-		
-		ra.CleanupStack();
 	}
 
 	void ASM_GatherVertices(
@@ -2129,36 +2151,46 @@ public:
 		X86Mem *vtxX,
 		X86Mem *vtxY, 
 		X86Mem *vtxW, 
-		X86Gp  &inVtxPtr, 
-		X86Gp  &inTrisPtr, 
-		X86Gp  &numLanes, 
-		X86Gp  &vtxLayoutPtr)
+		X86Gp  &numLanes)
 	{
+		ra.pushRegContext();
+
 		Label L_SkipFetch = cc.newLabel();
+		
+		X86Gp inTrisPtr = ra.newI64("inTrisPtr"), inVtxPtr = ra.newI64("inVtxPtr"), vtxLayoutPtr = ra.newI64("vtxLayoutPtr");
+		cc.mov(inTrisPtr, context.Mem_inTrisPtr);
+		cc.mov(inVtxPtr, context.Mem_inVtxPtr);
+		cc.mov(vtxLayoutPtr, context.Mem_vtxLayoutPtr);
+
 		cc.cmp(numLanes, 0);
 		cc.jle(L_SkipFetch);                                                                                                   // if (numLanes > 0)
 		{
 			// Compute per-lane index list offset that guards against out of bounds memory accesses
 			X86Ymm safeTriIdxOffset = ra.newYmm("safeTriIdxOffset");
-			cc.vpmovzxdq(safeTriIdxOffset, context.simd_i_tri_idx_offset);                                                     // safeTriIdxOffset = simd_i_tri_idx_offset
+			cc.vmovdqa(safeTriIdxOffset, context.simd_i_tri_idx_offset);                                                       // safeTriIdxOffset = simd_i_tri_idx_offset
 
-			X86Gp maskOffset = ra.newI64("maskAddr");
-			cc.mov(maskOffset, numLanes);
-			cc.shl(maskOffset, 5);                                                                                             // maskOffset = numLanes * 32
+			X86Ymm laneMask = ra.newYmm("laneMask");
+			ASM_set1(cc, laneMask, numLanes);
+			cc.vpcmpgtd(laneMask, laneMask, context.simd_i_lane_idx);
 
-			ra.free(maskOffset);
-			cc.vpand(safeTriIdxOffset, safeTriIdxOffset, x86::yword_ptr(context.simd_i_lane_mask[0].getOffset(), maskOffset)); // safeTriIdxOffset &= simd_i_lane_mask[numLanes]
+			ra.free(laneMask);
+			cc.vpand(safeTriIdxOffset, safeTriIdxOffset, laneMask);                                                            // safeTriIdxOffset &= simd_i_lane_mask[numLanes]
 
 			X86Ymm vtxStride = ra.newYmm("vtxStride");
 			ASM_set1(cc, vtxStride, x86::dword_ptr(vtxLayoutPtr, offsetof(VertexLayout, mStride)));                            // vtxStride = set1_epi32(vtxLayout.mStride)
 
 			X86Ymm vtxIdx[3] = { ra.newYmm("vtxIdx", 0), ra.newYmm("vtxIdx", 1), ra.newYmm("vtxIdx", 2) };
+			X86Ymm fetchMask[3] = { ra.newYmm("fetchMask", 0), ra.newYmm("fetchMask", 1), ra.newYmm("fetchMask", 2) };
+
+			cc.vpcmpeqd(fetchMask[0], fetchMask[0], fetchMask[0]);
+			cc.vpcmpeqd(fetchMask[1], fetchMask[1], fetchMask[1]);
+			cc.vpcmpeqd(fetchMask[2], fetchMask[2], fetchMask[2]);
 
 			// Fetch triangle indices.
-			cc.vpgatherdd(vtxIdx[0], x86::dword_ptr(inTrisPtr, safeTriIdxOffset, 2, 0));                                       // vtxIdx[0] = _mm256_i32gather_epi32((const int*)inTrisPtr + 0, safeTriIdxOffset, 4)
-			cc.vpgatherdd(vtxIdx[1], x86::dword_ptr(inTrisPtr, safeTriIdxOffset, 2, 4));                                       // vtxIdx[1] = _mm256_i32gather_epi32((const int*)inTrisPtr + 1, safeTriIdxOffset, 4)
+			cc.vpgatherdd(vtxIdx[0], x86::yword_ptr(inTrisPtr, safeTriIdxOffset, 2, 0), fetchMask[0]);                         // vtxIdx[0] = _mm256_i32gather_epi32((const int*)inTrisPtr + 0, safeTriIdxOffset, 4)
+			cc.vpgatherdd(vtxIdx[1], x86::yword_ptr(inTrisPtr, safeTriIdxOffset, 2, 4), fetchMask[1]);                         // vtxIdx[1] = _mm256_i32gather_epi32((const int*)inTrisPtr + 1, safeTriIdxOffset, 4)
 			ra.free(safeTriIdxOffset);
-			cc.vpgatherdd(vtxIdx[2], x86::dword_ptr(inTrisPtr, safeTriIdxOffset, 2, 8));                                       // vtxIdx[2] = _mm256_i32gather_epi32((const int*)inTrisPtr + 2, safeTriIdxOffset, 4)
+			cc.vpgatherdd(vtxIdx[2], x86::yword_ptr(inTrisPtr, safeTriIdxOffset, 2, 8), fetchMask[2]);                         // vtxIdx[2] = _mm256_i32gather_epi32((const int*)inTrisPtr + 2, safeTriIdxOffset, 4)
 			cc.vpmulld(vtxIdx[0], vtxIdx[0], vtxStride);                                                                       // vtxIdx[0] *= vtxStride
 			cc.vpmulld(vtxIdx[1], vtxIdx[1], vtxStride);                                                                       // vtxIdx[1] *= vtxStride
 			ra.free(vtxStride);
@@ -2166,9 +2198,11 @@ public:
 
 			// Fetch triangle vertices
 			X86Gp ptrX = ra.newI64("ptrX"), ptrY = ra.newI64("ptrY"), ptrW = ra.newI64("ptrW");
+			cc.xor_(ptrY, ptrY);
+			cc.xor_(ptrW, ptrW);
 			cc.lea(ptrX, x86::dword_ptr(inVtxPtr));                                                                            // ptrX = inVtxPtr
-			cc.mov(ptrY, x86::dword_ptr(vtxLayoutPtr, offsetof(VertexLayout, mOffsetY)));                                      // ptrY = vtxLayout.mOffsetY
-			cc.mov(ptrW, x86::dword_ptr(vtxLayoutPtr, offsetof(VertexLayout, mOffsetW)));                                      // ptrW = vtxLayout.mOffsetW
+			cc.mov(ptrY.r32(), x86::dword_ptr(vtxLayoutPtr, offsetof(VertexLayout, mOffsetY)));                                // ptrY = vtxLayout.mOffsetY
+			cc.mov(ptrW.r32(), x86::dword_ptr(vtxLayoutPtr, offsetof(VertexLayout, mOffsetW)));                                // ptrW = vtxLayout.mOffsetW
 			cc.lea(ptrY, x86::dword_ptr(inVtxPtr, ptrY));                                                                      // ptrY += inVtxPtr 
 			cc.lea(ptrW, x86::dword_ptr(inVtxPtr, ptrW));                                                                      // ptrW += inVtxPtr 
 
@@ -2180,42 +2214,61 @@ public:
 				tmpW[i] = ra.newYmm("tmpW", i);
 			}
 
-			cc.vgatherdps(tmpX[0], x86::dword_ptr(ptrX, vtxIdx[0], 0, 0));                                                     // tmpxX[0] = _mm256_i32gather_ps((float *)ptrX, vtxIdx[0], 1);
-			cc.vgatherdps(tmpY[0], x86::dword_ptr(ptrY, vtxIdx[0], 0, 0));                                                     // tmpxY[0] = _mm256_i32gather_ps((float *)ptrY, vtxIdx[0], 1);
+			cc.vpcmpeqd(fetchMask[0], fetchMask[0], fetchMask[0]);
+			cc.vpcmpeqd(fetchMask[1], fetchMask[1], fetchMask[1]);
+			cc.vpcmpeqd(fetchMask[2], fetchMask[2], fetchMask[2]);
+			cc.vgatherdps(tmpX[0], x86::dword_ptr(ptrX, vtxIdx[0], 0, 0), fetchMask[0]);                                       // tmpxX[0] = _mm256_i32gather_ps((float *)ptrX, vtxIdx[0], 1);
+			cc.vgatherdps(tmpY[0], x86::dword_ptr(ptrY, vtxIdx[0], 0, 0), fetchMask[1]);                                       // tmpxY[0] = _mm256_i32gather_ps((float *)ptrY, vtxIdx[0], 1);
 			ra.free(vtxIdx[0]);
-			cc.vgatherdps(tmpW[0], x86::dword_ptr(ptrW, vtxIdx[0], 0, 0));                                                     // tmpW[0] = _mm256_i32gather_ps((float *)ptrW, vtxIdx[0], 1);
+			cc.vgatherdps(tmpW[0], x86::dword_ptr(ptrW, vtxIdx[0], 0, 0), fetchMask[2]);                                       // tmpW[0] = _mm256_i32gather_ps((float *)ptrW, vtxIdx[0], 1);
 
-			cc.vgatherdps(tmpX[1], x86::dword_ptr(ptrX, vtxIdx[1], 0, 0));                                                     // tmpX[1] = _mm256_i32gather_ps((float *)ptrX, vtxIdx[1], 1);
-			cc.vgatherdps(tmpY[1], x86::dword_ptr(ptrY, vtxIdx[1], 0, 0));                                                     // tmpY[1] = _mm256_i32gather_ps((float *)ptrY, vtxIdx[1], 1);
+			cc.vpcmpeqd(fetchMask[0], fetchMask[0], fetchMask[0]);
+			cc.vpcmpeqd(fetchMask[1], fetchMask[1], fetchMask[1]);
+			cc.vpcmpeqd(fetchMask[2], fetchMask[2], fetchMask[2]);
+			cc.vgatherdps(tmpX[1], x86::dword_ptr(ptrX, vtxIdx[1], 0, 0), fetchMask[0]);                                       // tmpX[1] = _mm256_i32gather_ps((float *)ptrX, vtxIdx[1], 1);
+			cc.vgatherdps(tmpY[1], x86::dword_ptr(ptrY, vtxIdx[1], 0, 0), fetchMask[1]);                                       // tmpY[1] = _mm256_i32gather_ps((float *)ptrY, vtxIdx[1], 1);
 			ra.free(vtxIdx[1]);
-			cc.vgatherdps(tmpW[1], x86::dword_ptr(ptrW, vtxIdx[1], 0, 0));                                                     // tmpW[1] = _mm256_i32gather_ps((float *)ptrW, vtxIdx[1], 1);
+			cc.vgatherdps(tmpW[1], x86::dword_ptr(ptrW, vtxIdx[1], 0, 0), fetchMask[2]);                                       // tmpW[1] = _mm256_i32gather_ps((float *)ptrW, vtxIdx[1], 1);
 
-			cc.vgatherdps(tmpX[2], x86::dword_ptr(ptrX, vtxIdx[2], 0, 0));                                                     // tmpX[2] = _mm256_i32gather_ps((float *)ptrX, vtxIdx[2], 1);
-			cc.vgatherdps(tmpY[2], x86::dword_ptr(ptrY, vtxIdx[2], 0, 0));                                                     // tmpY[2] = _mm256_i32gather_ps((float *)ptrY, vtxIdx[2], 1);
+			cc.vpcmpeqd(fetchMask[0], fetchMask[0], fetchMask[0]);
+			cc.vpcmpeqd(fetchMask[1], fetchMask[1], fetchMask[1]);
+			cc.vpcmpeqd(fetchMask[2], fetchMask[2], fetchMask[2]);
+			ra.free(ptrX);
+			cc.vgatherdps(tmpX[2], x86::dword_ptr(ptrX, vtxIdx[2], 0, 0), fetchMask[0]);                                       // tmpX[2] = _mm256_i32gather_ps((float *)ptrX, vtxIdx[2], 1);
+			ra.free(ptrY);
+			cc.vgatherdps(tmpY[2], x86::dword_ptr(ptrY, vtxIdx[2], 0, 0), fetchMask[1]);                                       // tmpY[2] = _mm256_i32gather_ps((float *)ptrY, vtxIdx[2], 1);
+			ra.free(ptrW);
 			ra.free(vtxIdx[2]);
-			cc.vgatherdps(tmpW[2], x86::dword_ptr(ptrW, vtxIdx[2], 0, 0));                                                     // tmpW[2] = _mm256_i32gather_ps((float *)ptrW, vtxIdx[2], 1);
-			
+			cc.vgatherdps(tmpW[2], x86::dword_ptr(ptrW, vtxIdx[2], 0, 0), fetchMask[2]);                                       // tmpW[2] = _mm256_i32gather_ps((float *)ptrW, vtxIdx[2], 1);
+			ra.free(fetchMask[0]);
+			ra.free(fetchMask[1]);
+			ra.free(fetchMask[2]);
+
 			// Write back gathered vertices
-			ra.free(tmpX[0]);
 			cc.vmovaps(vtxX[0], tmpX[0]);
-			ra.free(tmpX[1]);
 			cc.vmovaps(vtxX[1], tmpX[1]);
-			ra.free(tmpX[2]);
 			cc.vmovaps(vtxX[2], tmpX[2]);
-			ra.free(tmpY[0]);
 			cc.vmovaps(vtxY[0], tmpY[0]);
-			ra.free(tmpY[1]);
 			cc.vmovaps(vtxY[1], tmpY[1]);
-			ra.free(tmpY[2]);
 			cc.vmovaps(vtxY[2], tmpY[2]);
-			ra.free(tmpW[0]);
 			cc.vmovaps(vtxW[0], tmpW[0]);
-			ra.free(tmpW[1]);
 			cc.vmovaps(vtxW[1], tmpW[1]);
-			ra.free(tmpW[1]);
 			cc.vmovaps(vtxW[2], tmpW[2]);
+
+			for (int i = 0; i < 3; ++i)
+			{
+				ra.free(tmpX[i]);
+				ra.free(tmpY[i]);
+				ra.free(tmpW[i]);
+			}
 		}
 		cc.bind(L_SkipFetch);
+
+		ra.free(inTrisPtr);
+		ra.free(inVtxPtr);
+		ra.free(vtxLayoutPtr);
+		
+		ra.popRegContext();
 	}
 
 	void ASM_TransformVerts(
@@ -2224,9 +2277,11 @@ public:
 		ASM_RasterizerContext &context,
 		X86Mem *vtxX, 
 		X86Mem *vtxY, 
-		X86Mem *vtxW, 
-		X86Gp &modelToClipMatrixPtr)
+		X86Mem *vtxW)
 	{
+		ra.pushRegContext();
+		X86Gp modelToClipMatrixPtr = ra.newI64("modelToClipMatrixPtr");
+		cc.mov(modelToClipMatrixPtr, context.Mem_modelToClipMatrixPtr);
 
 		Label L_SkipTransform = cc.newLabel();
 		cc.cmp(modelToClipMatrixPtr, 0);
@@ -2316,26 +2371,26 @@ public:
 			// Write back transformed vertices
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-			ra.free(tmpX[0]);
 			cc.vmovaps(vtxX[0], tmpX[0]);
-			ra.free(tmpX[1]);
 			cc.vmovaps(vtxX[1], tmpX[1]);
-			ra.free(tmpX[2]);
 			cc.vmovaps(vtxX[2], tmpX[2]);
-			ra.free(tmpY[0]);
 			cc.vmovaps(vtxY[0], tmpY[0]);
-			ra.free(tmpY[1]);
 			cc.vmovaps(vtxY[1], tmpY[1]);
-			ra.free(tmpY[2]);
 			cc.vmovaps(vtxY[2], tmpY[2]);
-			ra.free(tmpW[0]);
 			cc.vmovaps(vtxW[0], tmpW[0]);
-			ra.free(tmpW[1]);
 			cc.vmovaps(vtxW[1], tmpW[1]);
-			ra.free(tmpW[1]);
 			cc.vmovaps(vtxW[2], tmpW[2]);
+			for (int i = 0; i < 3; ++i)
+			{
+				ra.free(tmpX[i]);
+				ra.free(tmpY[i]);
+				ra.free(tmpW[i]);
+			}
 		}
 		cc.bind(L_SkipTransform);
+
+		ra.free(modelToClipMatrixPtr);
+		ra.popRegContext();
 	}
 
 	void ASM_ProjectVertices(
@@ -2347,14 +2402,23 @@ public:
 		X86Ymm *pVtxY, 
 		X86Ymm *pVtxZ)
 	{
+		ra.pushRegContext();
+
 		X86Ymm one = ra.newYmm("one");
 		ASM_set1(cc, one, context.simd_f_1_0);
 
 		// Compute 1 / w for all three vertices
-		cc.vdivps(pVtxZ[0], one, pVtxZ[0]);
-		cc.vdivps(pVtxZ[1], one, pVtxZ[1]);
+		cc.vdivps(pVtxZ[0], one, context.Mem_vtxW[0]);
+		cc.vdivps(pVtxZ[1], one, context.Mem_vtxW[1]);
 		ra.free(one);
-		cc.vdivps(pVtxZ[2], one, pVtxZ[2]);
+		cc.vdivps(pVtxZ[2], one, context.Mem_vtxW[2]);
+
+		cc.vmovaps(pVtxX[0], context.Mem_vtxX[0]);
+		cc.vmovaps(pVtxX[1], context.Mem_vtxX[1]);
+		cc.vmovaps(pVtxX[2], context.Mem_vtxX[2]);
+		cc.vmovaps(pVtxY[0], context.Mem_vtxY[0]);
+		cc.vmovaps(pVtxY[1], context.Mem_vtxY[1]);
+		cc.vmovaps(pVtxY[2], context.Mem_vtxY[2]);
 
 		// Project vertices and transform to screen space coordinates (multiply by screen resolution and offset)
 		cc.vmulps(pVtxX[0], pVtxX[0], x86::yword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mHalfWidth)));
@@ -2379,6 +2443,363 @@ public:
 		cc.vroundps(pVtxY[0], pVtxY[0], _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC);
 		cc.vroundps(pVtxY[1], pVtxY[1], _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC);
 		cc.vroundps(pVtxY[2], pVtxY[2], _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC);
+
+		ra.popRegContext();
+	}
+
+	void ASM_ClipPolygon(
+		X86Compiler &cc,
+		ASM_RegAllocator &ra,
+		ASM_RasterizerContext &context,
+		X86Gp &outVtxPtr,
+		X86Gp &inVtxPtr, 
+		const X86Xmm &plane, 
+		X86Gp &nVerts)
+	{
+		ra.pushRegContext();
+
+		cc.shl(nVerts, 4);                                                                        // nVerts *= sizeof(__m128)
+
+		Label L_loopStart = cc.newLabel();
+		Label L_loopExit = cc.newLabel();
+		Label L_writeP0Skip = cc.newLabel();
+		Label L_writeP1Skip = cc.newLabel();
+		Label L_writeP1Pos = cc.newLabel();
+
+		X86Xmm p0 = ra.newXmm("p0"), dist0 = ra.newXmm("dist0");
+		X86Xmm p1 = ra.newXmm("p1"), dist1 = ra.newXmm("dist1");
+		cc.vmovaps(p0, x86::dqword_ptr(inVtxPtr, nVerts, 0, -sizeof(__m128)));                    // p0 = inVtxPtr[nVerts-1]
+		cc.vdpps(dist0, p0, plane, 0xFF);                                                         // dist0 = dp4(p0, plane)
+
+		X86Gp outOffset = ra.newI32("outOffset");
+		cc.xor_(outOffset, outOffset);                                                            // outOffset = 0
+
+		// Loop over all polygon edges and compute intersection with clip plane (if any)
+		X86Gp k = ra.newI32("k");
+		X86Gp dist0Neg = ra.newI32("dist0Neg");
+		cc.xor_(k, k);
+		cc.bind(L_loopStart);                                                                     // for (k = 0; k < n; ++k)
+		{
+			cc.cmp(k, nVerts);
+			cc.jge(L_loopExit);
+
+			cc.vmovaps(p1, x86::dword_ptr(inVtxPtr, k, 0));                                       // p1 = inVtxPtr[k]
+			cc.vdpps(dist1, p1, plane, 0xFF);                                                     // dist1 = dp4(p1, plane)
+			cc.vmovmskps(dist0Neg, dist0);                                                        // dist0Neg = _mm_movemask_ps(dist0)
+
+			cc.cmp(dist0Neg, 0);
+			cc.jne(L_writeP0Skip);                                                                // if (!dist0Neg)
+			{
+				cc.vmovaps(x86::dword_ptr(outVtxPtr, outOffset, 0), p0);                          // outVtx[nOut] = p0
+				cc.add(outOffset, sizeof(__m128));                                                // nOut++
+			}
+			cc.bind(L_writeP0Skip);
+
+			// Edge intersects the clip plane if dist0 and dist1 have opposing signs
+			X86Xmm tmpXor = ra.newXmm("tmpXor");
+			X86Gp xorMask = ra.newI32("xorMask");
+			cc.vxorps(tmpXor, dist0, dist1);                                                      // tmpXor = dist0 ^ dist1
+			cc.vmovmskps(xorMask, tmpXor);                                                        // xorMask = _mm_movemask_ps(tmpXor)
+			cc.cmp(xorMask, 0);
+			cc.je(L_writeP1Skip);                                                                 // if (xorMask)
+			{
+				// Always clip from the positive side to avoid T-junctions
+				cc.cmp(dist0Neg, 0);
+				cc.jne(L_writeP1Pos);                                                             // if (!dist0Neg)
+				{
+					X86Xmm t = ra.newXmm("t"), v = ra.newXmm("v");
+					cc.vsubps(t, dist0, dist1);                                                   // t = dist0 - dist1
+					cc.vdivps(t, dist0, t);                                                       // t = dist0 / t
+					cc.vsubps(v, p1, p0);                                                         // v = p1 - p0
+					cc.vfmadd132ps(v, p0, t);                                                     // v = v * t + p0
+					cc.vmovaps(x86::dword_ptr(outVtxPtr, outOffset, 0), v);                       // outVtx[nOut] = v
+					cc.add(outOffset, sizeof(__m128));                                            // nOut++
+					ra.free(t);
+					ra.free(v);
+					cc.jmp(L_writeP1Skip);
+				}
+				cc.bind(L_writeP1Pos);
+				{
+					X86Xmm t = ra.newXmm("t"), v = ra.newXmm("v");
+					cc.vsubps(t, dist1, dist0);                                                   // t = dist1 - dist0
+					cc.vdivps(t, dist1, t);                                                       // t = dist1 / t
+					cc.vsubps(v, p0, p1);                                                         // v = p0 - p1
+					cc.vfmadd132ps(v, p1, t);                                                     // v = v * t + p1
+					cc.vmovaps(x86::dword_ptr(outVtxPtr, outOffset, 0), v);                       // outVtx[nOut] = v
+					cc.add(outOffset, sizeof(__m128));                                            // nOut++
+					ra.free(t);
+					ra.free(v);
+				}
+			}
+			cc.bind(L_writeP1Skip);
+			ra.free(tmpXor);
+			ra.free(xorMask);
+
+			cc.vmovaps(dist0, dist1);                                                             // dist0 = dist1
+			cc.vmovaps(p0, p1);                                                                   // p0 = p1
+
+			cc.add(k, sizeof(__m128));                                                            // k += sizeof(__m128)
+			cc.jmp(L_loopStart);
+		}
+		cc.bind(L_loopExit);
+
+		cc.mov(nVerts, outOffset);                                                                // nVerts = (nOut * sizeof(__m128))
+		cc.shr(nVerts, 4);                                                                        // nVerts /= sizeof(__m128)
+
+		ra.free(outOffset);
+		ra.free(k);
+		ra.free(dist0Neg);
+		ra.free(p0); ra.free(dist0);
+		ra.free(p1); ra.free(dist1);
+
+		ra.popRegContext();
+	}
+
+
+	void ASM_TestClipPlane(
+		X86Compiler &cc,
+		ASM_RegAllocator &ra,
+		ASM_RasterizerContext &context,
+		ClipPlanes CLIP_PLANE,
+		X86Ymm *vtxW, 
+		X86Ymm &nearDist,
+		X86Mem &straddleMask,
+		X86Gp &triMask)
+	{
+		ra.pushRegContext();
+
+		Label L_skipTest = cc.newLabel();
+
+		cc.mov(straddleMask, 0);                                                                                          // straddleMask = 0
+		cc.test(context.Mem_clipPlaneMask, CLIP_PLANE);                                                                   // if (clipPlaneMask & CLIP_PLANE)
+		cc.jz(L_skipTest);
+		{
+			X86Ymm planeDp[3] = { ra.newYmm("planeDp", 0) , ra.newYmm("planeDp", 1) , ra.newYmm("planeDp", 2) };
+
+			for (int i = 0; i < 3; ++i)
+			{
+				switch (CLIP_PLANE)
+				{
+				case ClipPlanes::CLIP_PLANE_LEFT:   cc.vaddps(planeDp[i], vtxW[i], context.Mem_vtxX[i]); break;
+				case ClipPlanes::CLIP_PLANE_RIGHT:  cc.vsubps(planeDp[i], vtxW[i], context.Mem_vtxX[i]); break;
+				case ClipPlanes::CLIP_PLANE_BOTTOM: cc.vaddps(planeDp[i], vtxW[i], context.Mem_vtxY[i]); break;
+				case ClipPlanes::CLIP_PLANE_TOP:    cc.vsubps(planeDp[i], vtxW[i], context.Mem_vtxY[i]); break;
+				case ClipPlanes::CLIP_PLANE_NEAR:   cc.vsubps(planeDp[i], vtxW[i], nearDist); break;
+				}
+			}
+
+			X86Ymm inside = ra.newYmm("inside"), outside = ra.newYmm("outside");
+			cc.vpxor(inside, planeDp[2], context.simd_i_not_0);                                                           // inside = ~planeDp[2]
+			ra.free(planeDp[2]);
+			cc.vpand(outside, planeDp[1], planeDp[2]);                                                                    // outside = planeDp[1] & planeDp[2]
+			ra.free(planeDp[1]);
+			cc.vpandn(inside, planeDp[1], inside);                                                                        // inside &= ~planeDp[1]
+			cc.vpand(outside, planeDp[0], outside);                                                                       // outside &= planeDp[0]
+			ra.free(planeDp[0]);
+			cc.vpandn(inside, planeDp[0], inside);                                                                        // isnide &= ~planeDp[0]
+
+			// Look at FP sign and determine if tri is inside, outside or straddles the frustum plane
+			X86Gp inMask = ra.newI32("inMask"), outMask = ra.newI32("outMask");
+			ra.free(inside);
+			cc.vmovmskps(inMask, inside);                                                                                 // inMask = movemask_ps(inside)
+			ra.free(outside);
+			cc.vmovmskps(outMask, outside);                                                                               // outMask = movemask_ps(outside)
+
+			cc.not_(outMask);                                                                                             // outMask = ~outMask
+			cc.not_(inMask);                                                                                              // inMask = ~inMask
+			
+			cc.mov(straddleMask, outMask);                                                                                // straddleMask = outMask
+			ra.free(inMask);
+			cc.and_(straddleMask, inMask);                                                                                // straddlemask &= inMask
+			ra.free(outMask);
+			cc.and_(triMask, outMask);                                                                                    // triMask &= outMask
+		}
+		cc.bind(L_skipTest);
+
+		ra.popRegContext();
+	}
+
+	void ASM_ClipTriangleAndAddToBuffer(
+		X86Compiler &cc,
+		ASM_RegAllocator &ra,
+		ASM_RasterizerContext &context,
+		X86Gp &msocPtr,
+		X86Gp &clipWriteIdx,
+		X86Gp &triMask,
+		X86Gp &triClipMask)
+	{
+		ra.pushRegContext();
+
+		Label L_skipClipping = cc.newLabel();
+		Label L_clipLoopStart = cc.newLabel();
+		Label L_clipLoopExit = cc.newLabel();
+		Label L_writeoutLoopStart = cc.newLabel();
+		Label L_writeoutSkip = cc.newLabel();
+
+		cc.cmp(triClipMask, 0);
+		cc.je(L_skipClipping);                                                                                            // if (triClipMask)
+		{
+			/////////////////////////////////////////////////////////////////////////////////////////////////////////
+			// Inside test all 3 triangle vertices against all active frustum planes
+			/////////////////////////////////////////////////////////////////////////////////////////////////////////
+			X86Ymm rVtxW[3] = { ra.newYmm("rVtxW", 0), ra.newYmm("rVtxW", 1), ra.newYmm("rVtxW", 2) };
+			X86Ymm nearDist = ra.newYmm("nearDist");
+			
+			ASM_set1(cc, nearDist, x86::dqword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mNearDist)));
+			cc.vmovaps(rVtxW[0], context.Mem_vtxW[0]);
+			cc.vmovaps(rVtxW[1], context.Mem_vtxW[1]);
+			cc.vmovaps(rVtxW[2], context.Mem_vtxW[2]);
+
+			ClipPlanes cpMasks[5] = { CLIP_PLANE_NEAR , CLIP_PLANE_LEFT, CLIP_PLANE_RIGHT, CLIP_PLANE_BOTTOM, CLIP_PLANE_TOP };
+			for (int i = 0; i < 5; ++i)
+			{
+				ASM_TestClipPlane(cc, ra, context, cpMasks[i], rVtxW, nearDist, context.Mem_straddleMask[i], triMask);
+			}
+
+			ra.free(rVtxW[0]);
+			ra.free(rVtxW[1]);
+			ra.free(rVtxW[2]);
+			ra.free(nearDist);
+
+			/////////////////////////////////////////////////////////////////////////////////////////////////////////
+			// Clip triangle against straddling planes and add to the clipped triangle buffer
+			/////////////////////////////////////////////////////////////////////////////////////////////////////////
+			X86Gp clipMask = ra.newI32("clipMask");
+			cc.mov(clipMask, context.Mem_straddleMask[0]);                                                                // clipMask = straddleMask[0]
+			cc.or_(clipMask, context.Mem_straddleMask[1]);                                                                // clipMask |= straddleMask[1]
+			cc.or_(clipMask, context.Mem_straddleMask[2]);                                                                // clipMask |= straddleMask[2]
+			cc.or_(clipMask, context.Mem_straddleMask[3]);                                                                // clipMask |= straddleMask[3]
+			cc.or_(clipMask, context.Mem_straddleMask[4]);                                                                // clipMask |= straddleMask[4]
+			cc.and_(clipMask, triClipMask);                                                                               // clipMask &= triClipMask
+			cc.and_(clipMask, triMask);                                                                                   // clipMask &= triMask
+			cc.bind(L_clipLoopStart);
+			cc.cmp(clipMask, 0);
+			cc.je(L_clipLoopExit);                                                                                        // while(clipMask)
+			{
+
+				X86Gp triIdx = ra.getI32(x86::ecx, "triIdx");
+				X86Gp triBit = ra.newI32("triBit");
+
+				cc.bsf(triIdx, clipMask);                                                                                 // _BitScanForward(clipMask)
+				X86Gp tmp = ra.newI32("tmp");
+				cc.lea(tmp, X86Mem(clipMask, -1));                                                                        // tmp = clipMask - 1
+				ra.free(tmp);
+				cc.and_(clipMask, tmp);                                                                                   // clipMask &= (clipMask - 1)
+
+				cc.mov(triBit, 1);
+				cc.shl(triBit, triIdx);                                                                                   // triBit = 1U << triIdx
+
+				// Copy triangle to scratchpad clipping buffer
+				for (int i = 0; i < 3; i++)
+				{
+					X86Gp tmpX = ra.newI32("tmpX"), tmpY = ra.newI32("tmpY"), tmpW = ra.newI32("tmWX");
+					cc.mov(tmpX, ASM_MemAdjust(context.Mem_vtxX[i], triIdx, 2, 0));
+					cc.mov(tmpY, ASM_MemAdjust(context.Mem_vtxY[i], triIdx, 2, 0));
+					cc.mov(tmpW, ASM_MemAdjust(context.Mem_vtxW[i], triIdx, 2, 0));
+					cc.mov(context.Mem_vtxBuf.adjusted(i * sizeof(__m128) + sizeof(float)*0), tmpX);                      // vtxBuf[i].f32[0] = vtxX[i].f32[triIdx]
+					cc.mov(context.Mem_vtxBuf.adjusted(i * sizeof(__m128) + sizeof(float)*1), tmpY);                      // vtxBuf[i].f32[1] = vtxY[i].f32[triIdx]
+					cc.mov(context.Mem_vtxBuf.adjusted(i * sizeof(__m128) + sizeof(float)*2), tmpW);                      // vtxBuf[i].f32[2] = vtxW[i].f32[triIdx]
+					X86Mem wComponent = context.Mem_vtxBuf.adjusted(i * sizeof(__m128) + sizeof(float) * 3);
+					wComponent.setSize(sizeof(float));
+					cc.mov(wComponent, 0x3f800000);                                                                       // vtxBuf[i].f32[3] = 1.0f
+					ra.free(tmpX);
+					ra.free(tmpY);
+					ra.free(tmpW);
+				}
+
+				X86Gp srcBufPtr = ra.newI64("srcBufPtr"), dstBufPtr = ra.newI64("dstBufPtr"), nClippedVerts = ra.newI32("nClippedVerts");
+				cc.mov(nClippedVerts, 3);
+
+				cc.lea(srcBufPtr, context.Mem_vtxBuf);                                                                    // srcBufPtr = context.Mem_vtxBuf[0]
+				cc.lea(dstBufPtr, context.Mem_vtxBuf.adjusted(8 * sizeof(__m128)));                                       // dstBufPtr = context.Mem_vtxBuf10]
+
+				// Clip triangle with straddling planes, ping pong between clipping scratchpad buffers
+				for (int i = 0; i < 5; ++i)
+				{
+					Label L_skipPlane = cc.newLabel();
+					cc.test(context.Mem_straddleMask[i], triBit);
+					cc.jz(L_skipPlane);
+					cc.test(context.Mem_clipPlaneMask, (1 << i));
+					cc.jz(L_skipPlane);                                                                                   // if ((straddleMask[i] & triBit) && (clipPlaneMas & (1 << i)))
+					{
+						X86Xmm clipPlane = ra.newXmm("clipPlane");
+						cc.vmovaps(clipPlane, x86::yword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mCSFrustumPlanes[i]))); // clipPlane = mCSFrustumPlanes[i]
+
+						// Clip the triangle
+						ASM_ClipPolygon(cc, ra, context, dstBufPtr, srcBufPtr, clipPlane, nClippedVerts);
+					
+						cc.xchg(srcBufPtr, dstBufPtr);                                                                    // swap(scrBufPtr, dstBufPtr)
+						ra.free(clipPlane);
+					}
+					cc.bind(L_skipPlane);
+				}
+				ra.free(dstBufPtr);
+
+				cc.cmp(nClippedVerts, 3);
+				cc.jl(L_writeoutSkip);                                                                                    // if (nClippedVerts >= 3)
+				{
+					// Compute address to current scratchpad ping-pong buffer
+					// Write the first triangle back into the list of currently processed triangles
+					for (int i = 0; i < 3; i++)
+					{
+						X86Gp tmpX = ra.newI32("tmpX"), tmpY = ra.newI32("tmpY"), tmpW = ra.newI32("tmWX");
+						cc.mov(tmpX, x86::dword_ptr(srcBufPtr, sizeof(__m128) * i + sizeof(float)*0));                    // tmpX = srcBufPtr[i].f32[0]
+						cc.mov(tmpY, x86::dword_ptr(srcBufPtr, sizeof(__m128) * i + sizeof(float)*1));                    // tmpY = srcBufPtr[i].f32[1]
+						cc.mov(tmpW, x86::dword_ptr(srcBufPtr, sizeof(__m128) * i + sizeof(float)*2));                    // tmpW = srcBufPtr[i].f32[2]
+						cc.mov(ASM_MemAdjust(context.Mem_vtxX[i], triIdx, 2, 0), tmpX);                                   // vtxX[i].f32[triIdx] = tmpX
+						cc.mov(ASM_MemAdjust(context.Mem_vtxY[i], triIdx, 2, 0), tmpY);                                   // vtxY[i].f32[triIdx] = tmpY
+						cc.mov(ASM_MemAdjust(context.Mem_vtxW[i], triIdx, 2, 0), tmpW);                                   // vtxW[i].f32[triIdx] = tmpW
+						ra.free(triIdx);
+						ra.free(tmpX);
+						ra.free(tmpY);
+						ra.free(tmpW);
+					}
+					
+					// Write the remaining triangles into the clip buffer and process them next loop iteration
+					X86Gp loopCntr = ra.newI32("loopCntr");
+					X86Xmm vtx[3] = { ra.newXmm("vtx", 0), ra.newXmm("vtx", 1), ra.newXmm("vtx", 2) };
+					cc.vmovaps(vtx[0], x86::dqword_ptr(srcBufPtr));                                                       // vtx[0] = srcBufPtr[0]
+					cc.mov(loopCntr, 2*sizeof(__m128));
+					cc.dec(nClippedVerts);                                                                                // nClippedVerts--
+					cc.shl(nClippedVerts, 4);                                                                             // nClippedVerts <<= 4
+					cc.bind(L_writeoutLoopStart);
+					cc.cmp(loopCntr, nClippedVerts);                                                                      // for (int loopCntr = 2; loopcntr < nClippedVerts-1; loopCntr++)
+					cc.jge(L_clipLoopStart); // Jump straight back to main loop
+					{
+						cc.vmovaps(vtx[1], x86::dqword_ptr(srcBufPtr, loopCntr, 0, 0));                                   // vtx[1] = srcBufPtr[loopCntr]
+						cc.vmovaps(vtx[2], x86::dqword_ptr(srcBufPtr, loopCntr, 0, sizeof(__m128)));                      // vtx[2] = srcBufPtr[loopCntr + 1]
+						X86Gp clipWriteAddr = ra.newI64("clipWriteAddr");
+						cc.lea(clipWriteAddr, x86::dword_ptr(clipWriteIdx, clipWriteIdx, 1, 0));                          // clipWriteAddr = clipWriteIdx * 3
+						cc.vmovaps(ASM_MemAdjust(context.Mem_clipVtxBuffer, clipWriteAddr, 0, sizeof(__m128) * 0), vtx[0]); // clipVtxBuffer[clipWriteAddr + 0] = vtx[0]
+						cc.vmovaps(ASM_MemAdjust(context.Mem_clipVtxBuffer, clipWriteAddr, 0, sizeof(__m128) * 1), vtx[1]); // clipVtxBuffer[clipWriteAddr + 1] = vtx[1]
+						cc.vmovaps(ASM_MemAdjust(context.Mem_clipVtxBuffer, clipWriteAddr, 0, sizeof(__m128) * 2), vtx[2]); // clipVtxBuffer[clipWriteAddr + 2] = vtx[2]
+						ra.free(clipWriteAddr);
+						cc.inc(clipWriteIdx);                                                                             // clipWriteIdx++
+						cc.and_(clipWriteIdx, MAX_CLIPPED - 1);                                                           // clipWriteIdx &= MAX_CLIPPED - 1
+						cc.add(loopCntr, sizeof(__m128));
+					}
+					ra.free(vtx[0]);
+					ra.free(vtx[1]);
+					ra.free(vtx[2]);
+					ra.free(loopCntr);
+					ra.free(srcBufPtr);
+					ra.free(nClippedVerts);
+				}
+				cc.bind(L_writeoutSkip);                                                                                  // else
+				{
+					// Kill triangles that was removed by clipping
+					cc.not_(triBit);
+					cc.and_(triMask, triBit);
+					ra.free(triBit);
+					cc.jmp(L_clipLoopStart);
+				}
+			}
+			cc.bind(L_clipLoopExit);
+			ra.free(clipMask);
+		}
+		cc.bind(L_skipClipping);
+		
+		ra.popRegContext();
 	}
 
 	void ASM_CullBackfaces(
@@ -2389,33 +2810,25 @@ public:
 		X86Ymm *pVtxY,
 		X86Ymm *pVtxZ,
 		X86Gp &triMask,
-		X86Ymm &ccwMask,
-		X86Mem bfWinding)
+		X86Ymm &ccwMask)
 	{
+		ra.pushRegContext();
+
 		Label L_SkipRewind = cc.newLabel();
 #if USE_D3D != 0
-		cc.cmp(bfWinding, BACKFACE_CCW);
+		cc.cmp(context.Mem_bfWinding, BACKFACE_CCW);
 #else
-		cc.cmp(bfWinding, BACKFACE_CW);
+		cc.cmp(context.Mem_bfWinding, BACKFACE_CW);
 #endif
 		cc.je(L_SkipRewind);
 		{
-			X86Ymm tmpX = cc.newYmm("tmpX"), tmpY = cc.newYmm("tmpY"), tmpZ = cc.newYmm("tmpZ");
-#if USE_D3D != 0
-			cc.vblendvps(tmpX, pVtxX[0], pVtxX[2], ccwMask);
-			cc.vblendvps(tmpY, pVtxY[0], pVtxX[2], ccwMask);
-			cc.vblendvps(tmpZ, pVtxZ[0], pVtxZ[2], ccwMask);
-			cc.vblendvps(pVtxX[2], pVtxX[2], pVtxX[0], ccwMask);
-			cc.vblendvps(pVtxY[2], pVtxY[2], pVtxX[0], ccwMask);
-			cc.vblendvps(pVtxZ[2], pVtxZ[2], pVtxZ[0], ccwMask);
-#else
+			X86Ymm tmpX = ra.newYmm("tmpX"), tmpY = ra.newYmm("tmpY"), tmpZ = ra.newYmm("tmpZ");
 			cc.vblendvps(tmpX, pVtxX[2], pVtxX[0], ccwMask);
-			cc.vblendvps(tmpY, pVtxY[2], pVtxX[0], ccwMask);
+			cc.vblendvps(tmpY, pVtxY[2], pVtxY[0], ccwMask);
 			cc.vblendvps(tmpZ, pVtxZ[2], pVtxZ[0], ccwMask);
 			cc.vblendvps(pVtxX[2], pVtxX[0], pVtxX[2], ccwMask);
-			cc.vblendvps(pVtxY[2], pVtxY[0], pVtxX[2], ccwMask);
+			cc.vblendvps(pVtxY[2], pVtxY[0], pVtxY[2], ccwMask);
 			cc.vblendvps(pVtxZ[2], pVtxZ[0], pVtxZ[2], ccwMask);
-#endif
 			ra.free(tmpX);
 			cc.vmovaps(pVtxX[0], tmpX);
 			ra.free(tmpY);
@@ -2433,59 +2846,60 @@ public:
 		cc.xor_(ffMask2, ffMask2);
 		cc.mov(ccwMask_not, ccwMask_reg);
 		cc.not_(ccwMask_not);
+		// return ((bfWinding & BACKFACE_CCW) ? 0 : _mmw_movemask_ps(ccwMask)) | ((bfWinding & BACKFACE_CW) ? 0 : ~_mmw_movemask_ps(ccwMask));
+
 #if USE_D3D != 0
-		cc.test(bfWinding, BACKFACE_CW);
+		cc.test(context.Mem_bfWinding, BACKFACE_CW);
 		ra.free(ccwMask_reg);
 		cc.cmovz(ffMask1, ccwMask_reg);
-		cc.test(bfWinding, BACKFACE_CCW);
+		cc.test(context.Mem_bfWinding, BACKFACE_CCW);
 		ra.free(ccwMask_not);
 		cc.cmovz(ffMask2, ccwMask_not);
+		ra.free(ffMask2);
+		cc.or_(ffMask1, ffMask2);
 #else
-		cc.test(bfWinding, BACKFACE_CCW);
+		cc.test(context.Mem_bfWinding, BACKFACE_CCW);
 		ra.free(ccwMask_reg);
 		cc.cmovz(ffMask1, ccwMask_reg);
-		cc.test(bfWinding, BACKFACE_CW);
+		cc.test(context.Mem_bfWinding, BACKFACE_CW);
 		ra.free(ccwMask_not);
 		cc.cmovz(ffMask2, ccwMask_not);
+		ra.free(ffMask2);
+		cc.or_(ffMask1, ffMask2);
 #endif
 		ra.free(ffMask1);
 		cc.and_(triMask, ffMask1);
-		ra.free(ffMask2);
-		cc.and_(triMask, ffMask2);
+
+		ra.popRegContext();
 	}
 
 	void ASM_RenderTriangles(
 		X86Compiler &cc,
 		ASM_RegAllocator &ra,
+		ASM_RasterizerContext &context,
 		int TEST_Z,
-		int FAST_GATHER,
-		X86Gp &msocPtr,
-		X86Gp &inVtxPtr,
-		X86Gp &inTrisPtr,
-		X86Mem &nTris,
-		X86Gp &modelToClipMatrixPtr,
-		X86Gp &bfWinding,
-		X86Gp &clipPlaneMask,
-		X86Gp &vtxLayoutPtr)
+		int FAST_GATHER)
 	{
-		ASM_RasterizerContext context(cc, ra);
-		ra.InitializeStack();
 
 #if PRECISE_COVERAGE != 0
 #endif
-		X86Gp clipHead = ra.newI32("clipHead");
-		X86Gp clipTail = ra.newI32("clipTail");
-		X86Gp trisLeft = ra.newI32("triIdx");
+		Label L_VisibleExit = cc.newLabel();
+		Label L_Exit = cc.newLabel();
 
-		cc.xor_(clipHead, clipHead);
-		cc.xor_(clipTail, clipTail);
+		cc.mov(context.Mem_clipHead, 0);
+		cc.mov(context.Mem_clipTail, 0);
 
 		Label L_TriLoopPrologue = cc.newLabel();
 		Label L_TriLoopStart = cc.newLabel();
 		Label L_TriLoopExit = cc.newLabel();
 		
 		cc.bind(L_TriLoopPrologue);
-		cc.cmp(nTris, 0);
+		X86Gp clipHead = ra.newI32("clipHead");
+		X86Gp clipTail = ra.newI32("clipTail");
+		cc.mov(clipHead, context.Mem_clipHead);
+		cc.mov(clipTail, context.Mem_clipTail);
+
+		cc.cmp(context.Mem_nTris, 0);
 		cc.jg(L_TriLoopStart);
 		cc.cmp(clipHead, clipTail);
 		cc.jne(L_TriLoopStart);
@@ -2496,7 +2910,7 @@ public:
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 			// Assemble triangles from the index list
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+			
 			X86Gp triMask = ra.newI32("triMask");
 			X86Gp triClipMask = ra.newI32("triClipMask");
 
@@ -2508,6 +2922,7 @@ public:
 			cc.je(L_FetchNoClip);
 			cc.bind(L_FetchClip);                                                    // if (clipHead != clipTail)
 			{
+				cc.int3();
 				/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 				// "Got unprocessed clipped triangles" branch: Fetch vertices from clip buffer, and pad with vertices to fill out SIMD width
 				/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2534,8 +2949,8 @@ public:
 				X86Gp ncTris = ra.newI32("ncTris");
 				cc.mov(ncTris, SIMD_LANES);
 				cc.sub(ncTris, clippedTris);
-				cc.cmp(ncTris, nTris);
-				cc.cmovg(ncTris, nTris);                                            // numLanes = min(SIMD_LANES - clippedTris, nTris)
+				cc.cmp(ncTris, context.Mem_nTris);
+				cc.cmovg(ncTris, context.Mem_nTris);                                  // ncTris = min(SIMD_LANES - clippedTris, nTris)
 
 				// Fetch non-clipped triangles
 				Label L_SkipGather = cc.newLabel();
@@ -2543,57 +2958,72 @@ public:
 				cc.jle(L_SkipGather);
 				{
 					// Gather vertices from memory
-					ASM_GatherVertices(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW, inVtxPtr, inTrisPtr, ncTris, vtxLayoutPtr);
+					ASM_GatherVertices(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW, ncTris);
 					// Transform to clip space
-					ASM_TransformVerts(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW, modelToClipMatrixPtr);
+					ASM_TransformVerts(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW);
 				}
 				cc.bind(L_SkipGather);
 
+				cc.int3();
+
 				// Pad with clipped triangles
+				X86Gp clipTri = ra.newI32("clipTri"), totalLanes = ra.getI32(x86::ecx, "totalLanes");
+				cc.mov(clipTri, ncTris);                                              // clipTri = ncTris
+				cc.lea(totalLanes, x86::dword_ptr(clippedTris, ncTris));              // totalLanes = clippedTris + ncTris
 				Label L_ClipBufferLoop = cc.newLabel();
 				Label L_ClipBufferLoopExit = cc.newLabel();
 				cc.bind(L_ClipBufferLoop);
+				cc.cmp(clipTri, totalLanes);
+				cc.jge(L_ClipBufferLoopExit);                                         // for (int clipTri = numLanes; clipTri < numLanes + clippedTris; clipTri++)
 				{
-					//				for (int clipTri = numLanes; clipTri < numLanes + clippedTris; clipTri++)
-					//				{
-					//					int triIdx = clipTail * 3;
-					//					for (int i = 0; i < 3; i++)
-					//					{
-					//						simd_f32(vtxX[i])[clipTri] = simd_f32(clipVtxBuffer[triIdx + i])[0];
-					//						simd_f32(vtxY[i])[clipTri] = simd_f32(clipVtxBuffer[triIdx + i])[1];
-					//						simd_f32(vtxW[i])[clipTri] = simd_f32(clipVtxBuffer[triIdx + i])[2];
-					//						if (TEXTURE_COORDINATES)
-					//						{
-					//							simd_f32(vtxU[i])[clipTri] = simd_f32(clipTexBuffer[triIdx + i])[0];
-					//							simd_f32(vtxV[i])[clipTri] = simd_f32(clipTexBuffer[triIdx + i])[1];
-					//						}
-					//					}
-					//					clipTail = (clipTail + 1) & (MAX_CLIPPED - 1);
-					//				}
-
+					X86Gp triIdx = ra.newI32("triIdx");
+					cc.lea(triIdx, x86::dword_ptr(clipTail, clipTail, 1));            // triIdx = clipTail * 3
+					cc.shl(triIdx, 4);                                                // triIdx *= sizeof(__m128)
+					for (int i = 0; i < 3; ++i)
+					{
+						X86Gp tmpX = ra.newI32("tmpX"), tmpY = ra.newI32("tmpY"), tmpW = ra.newI32("tmpW");
+						cc.mov(tmpX, ASM_MemAdjust(context.Mem_clipVtxBuffer, triIdx, 0, i * sizeof(__m128) + 0*sizeof(float))); // tmpX = clipVtxBuffer[triIdx + i].f32[0]
+						cc.mov(tmpY, ASM_MemAdjust(context.Mem_clipVtxBuffer, triIdx, 0, i * sizeof(__m128) + 1*sizeof(float))); // tmpY = clipVtxBuffer[triIdx + i].f32[1]
+						cc.mov(tmpW, ASM_MemAdjust(context.Mem_clipVtxBuffer, triIdx, 0, i * sizeof(__m128) + 2*sizeof(float))); // tmpW = clipVtxBuffer[triIdx + i].f32[2]
+						cc.mov(ASM_MemAdjust(context.Mem_vtxX[i], clipTri, 2, 0), tmpX);                                         // vtxX[i].f32[clipTri] = tmpX
+						cc.mov(ASM_MemAdjust(context.Mem_vtxY[i], clipTri, 2, 0), tmpY);                                         // vtxY[i].f32[clipTri] = tmpY
+						cc.mov(ASM_MemAdjust(context.Mem_vtxW[i], clipTri, 2, 0), tmpW);                                         // vtxW[i].f32[clipTri] = tmpW
+						ra.free(tmpX);
+						ra.free(tmpY);
+						ra.free(tmpW);
+					}
+					ra.free(triIdx);
+					cc.inc(clipTail);                                                 // clipTail++;
+					cc.and_(clipTail, MAX_CLIPPED - 1);                               // clipTail &= MAX_CLIPPED - 1
+					cc.inc(clipTri);
+					cc.jmp(L_ClipBufferLoop);
 				}
 				cc.bind(L_ClipBufferLoopExit);
+				ra.free(clipTri);
 
 				ra.free(clippedTris);
-				X86Gp numLanes = ra.getI32(x86::ecx, "numLanes");
-				cc.lea(numLanes, X86Mem(clippedTris, ncTris, 0, 0));                  // numLanes = clippedTris + ncTris
 
-				cc.sub(nTris, numLanes);                                              // nTris -= numLanes
-				cc.lea(numLanes, X86Mem(numLanes, numLanes, 1, 0));                   // numLanes *= 3
-				cc.lea(inTrisPtr, X86Mem(inTrisPtr, numLanes, 2, 0));                 // inTrisPtr += numLanes*sizeof(int)
+				cc.sub(context.Mem_nTris, ncTris);                                    // nTris -= ncTris
+				X86Gp ptrOffset = cc.newI32("ptrOffset");
+				cc.lea(ptrOffset, X86Mem(ncTris, ncTris, 1, 0));                      // ptrOffset = ncTris * 3
+				cc.shl(ptrOffset, 2);                                                 // ptrOffset *= sizeof(int)
+				cc.add(context.Mem_inTrisPtr, ptrOffset);                             // inTrisPtr += ptrOffset
+				ra.free(ptrOffset);
 
 				cc.mov(triMask, 1);
-				cc.shl(triMask, numLanes);
+				cc.shl(triMask, totalLanes);
 				cc.dec(triMask);                                                      // triMask = (1U << numLanes) - 1
 
 				// Set up clipped tris mask to avoid re-clipping already clipped triangles
 				ra.free(ncTris);
-				cc.mov(numLanes, ncTris);
+				cc.mov(totalLanes, ncTris);
 				cc.mov(triClipMask, 1);
-				cc.shl(triClipMask, numLanes);
+				cc.shl(triClipMask, totalLanes);
 				cc.dec(triClipMask);                                                  // triClipMask = (1U << ncTris) - 1
+				ra.free(totalLanes);
 
-				ra.free(numLanes);
+				cc.int3();
+
 				cc.jmp(L_FetchExit);
 			}
 			cc.bind(L_FetchNoClip);                                                   // else
@@ -2604,8 +3034,8 @@ public:
 
 				X86Gp numLanes = ra.getI32(x86::ecx, "numLanes");
 				cc.mov(numLanes, SIMD_LANES);
-				cc.cmp(numLanes, nTris);
-				cc.cmovg(numLanes, nTris);                                            // numLanes = min(SIMD_LANES, nTris)
+				cc.cmp(numLanes, context.Mem_nTris);
+				cc.cmovg(numLanes, context.Mem_nTris);                                // numLanes = min(SIMD_LANES, nTris)
 
 				cc.mov(triMask, 1);
 				cc.shl(triMask, numLanes);
@@ -2614,12 +3044,12 @@ public:
 				cc.mov(triClipMask, triMask);                                         // triClipMask = triMask
 
 				// Gather vertices from memory
-				ASM_GatherVertices(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW, inVtxPtr, inTrisPtr, numLanes, vtxLayoutPtr);
+				ASM_GatherVertices(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW, numLanes);
 				// Transform to clip space
-				ASM_TransformVerts(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW, modelToClipMatrixPtr);
-				
-				cc.sub(nTris, SIMD_LANES);
-				cc.add(inTrisPtr, SIMD_LANES * 3 * sizeof(int));
+				ASM_TransformVerts(cc, ra, context, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW);
+
+				cc.sub(context.Mem_nTris, numLanes);
+				cc.add(context.Mem_inTrisPtr, SIMD_LANES * 3 * sizeof(int));
 
 				ra.free(numLanes);
 			}
@@ -2629,11 +3059,26 @@ public:
 			// Clip transformed triangles
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-			//			if (clipPlaneMask != ClipPlanes::CLIP_PLANE_NONE)
-			//				ClipTriangleAndAddToBuffer<TEXTURE_COORDINATES>(vtxX, vtxY, vtxW, vtxU, vtxV, clipVtxBuffer, clipTexBuffer, clipHead, triMask, triClipMask, clipPlaneMask);
-			//
-			//			if (triMask == 0x0)
-			//				continue;
+			X86Gp msocPtr = ra.newI64("msocPtr");
+			cc.mov(msocPtr, context.i64_msoc_ptr);
+
+			Label L_skipClipping = cc.newLabel();
+			cc.cmp(context.Mem_clipPlaneMask, CLIP_PLANE_NONE);
+			cc.je(L_skipClipping);                                                    // if (clipPlaneMask != CLIP_PLANE_NONE)
+			{
+				// Clip all triangles against view frustum, spill clipped triangles on a buffer and render next simd-batch
+				ASM_ClipTriangleAndAddToBuffer(cc, ra, context, msocPtr, clipHead, triMask, triClipMask);
+			}
+			cc.bind(L_skipClipping);
+
+			ra.free(clipHead);
+			cc.mov(context.Mem_clipHead, clipHead);
+			ra.free(clipTail);
+			cc.mov(context.Mem_clipTail, clipTail);
+			ra.free(triClipMask);
+
+			cc.cmp(triMask, 0);
+			cc.je(L_TriLoopPrologue);                                                 // if (!triMask) continue
 
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 			// Project, transform to screen space and perform backface culling. Note
@@ -2643,6 +3088,13 @@ public:
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 			X86Ymm pVtxX[3], pVtxY[3], pVtxZ[3];
+			for (int i = 0; i < 3; ++i)
+			{
+				pVtxX[i] = ra.newYmm("pVtxX", i);
+				pVtxY[i] = ra.newYmm("pVtxY", i);
+				pVtxZ[i] = ra.newYmm("pVtxZ", i);
+			}
+
 			ASM_ProjectVertices(cc, ra, context, msocPtr, pVtxX, pVtxY, pVtxZ);
 
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2670,7 +3122,9 @@ public:
 			X86Ymm ccwMask = ra.newYmm("ccwMask");
 			cc.vcmpps(ccwMask, triArea, context.simd_i_0, _CMP_GT_OQ);                // ccwMask = triArea > 0.0f
 
-			ASM_CullBackfaces(cc, ra, context, pVtxX, pVtxY, pVtxZ, triMask, ccwMask, bfWinding);
+			ASM_CullBackfaces(cc, ra, context, pVtxX, pVtxY, pVtxZ, triMask, ccwMask);
+			
+			ra.free(ccwMask);
 
 			cc.cmp(triMask, 0);
 			cc.je(L_TriLoopPrologue);                                                 // if (!triMask) continue
@@ -2679,13 +3133,39 @@ public:
 			// Setup and rasterize a SIMD batch of triangles
 			/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-			//mASMRasterizeTriangleBatch(this, nullptr, nullptr, pVtxX, pVtxY, pVtxZ, nullptr, nullptr, triMask, &mFullscreenScissor);
+			for (int i = 0; i < 3; ++i) // JON: How to handle this nasty spilling? :(
+			{
+				cc.vmovaps(context.Mem_vtxX[i], pVtxX[i]);
+				cc.vmovaps(context.Mem_vtxY[i], pVtxY[i]);
+				cc.vmovaps(context.Mem_vtxW[i], pVtxZ[i]);
+				ra.free(pVtxX[i]);
+				ra.free(pVtxY[i]);
+				ra.free(pVtxZ[i]);
+			}
+
+			ra.free(msocPtr);
+			X86Gp scissorPtr = ra.newI64("scissorPtr");
+			cc.lea(scissorPtr, x86::dword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mFullscreenScissor)));
+
+			ASM_RasterizeTriangleBatch(cc, ra, context, TEST_Z, L_VisibleExit, context.Mem_vtxX, context.Mem_vtxY, context.Mem_vtxW, triMask, scissorPtr);
+			ra.free(scissorPtr);
 
 			cc.jmp(L_TriLoopPrologue);
 		}
 		cc.bind(L_TriLoopExit);
 
-		// Cleanup code
+		// Went through the whole loop, means everytrhing was occluded (if we're testing)
+		cc.mov(x86::rax, TEST_Z ? OCCLUDED : VISIBLE);
+		cc.jmp(L_Exit);
+
+		// Early exit for when using TestZ
+		if (TEST_Z)
+		{
+			cc.jmp(L_Exit);
+			cc.bind(L_VisibleExit);
+			cc.mov(x86::rax, VISIBLE);
+		}
+		cc.bind(L_Exit);
 
 	}
 
@@ -2734,24 +3214,90 @@ public:
 		int StackOffset = 40 + 168 + 64; // shadow space + xmm space + gp space
 
 		X86Gp msocPtr = ra.getI64(x86::rcx, "msocPtr");
-		X86Gp ipVtxXPtr = ra.getI64(x86::rdx, "ipVtxXPtr");
-		X86Gp ipVtxYPtr = ra.getI64(x86::r8, "ipVtxYPtr");
-		X86Gp pVtxXPtr = ra.getI64(x86::r9, "pVtxXPtr");
-		X86Gp pVtxYPtr = ra.newI64("pVtxYPtr");
-		X86Gp pVtxZPtr = ra.newI64("pVtxZPtr");
-		X86Gp pVtxUPtr = ra.newI64("pVtxUPtr");
-		X86Gp pVtxVPtr = ra.newI64("pVtxVPtr");
-		X86Gp triMask = ra.newI32("triMask");
-		X86Gp scissorPtr = ra.newI64("scissorPtr");
+		X86Gp inVtxPtr = ra.getI64(x86::rdx, "inVtxPtr");
+		X86Gp inTrisPtr = ra.getI64(x86::r8, "inTrisPtr");
+		X86Gp nTris = ra.getI64(x86::r9, "nTris");
+		X86Gp modelToClipMatrixPtr = ra.newI64("modelToClipMatrixPtr");
+		X86Gp bfWinding = ra.newI64("bfWinding");
+		X86Gp clipPlaneMask = ra.newI64("clipPlaneMask");
+		X86Gp vtxLayoutPtr = ra.newI64("vtxLayoutPtr");
 
-		cc.mov(pVtxYPtr, x86::qword_ptr(x86::rsp, StackOffset));
-		cc.mov(pVtxZPtr, x86::qword_ptr(x86::rsp, StackOffset + 8));
-		cc.mov(pVtxUPtr, x86::qword_ptr(x86::rsp, StackOffset + 16));
-		cc.mov(pVtxVPtr, x86::qword_ptr(x86::rsp, StackOffset + 24));
-		cc.mov(triMask, x86::dword_ptr(x86::rsp, StackOffset + 32));
-		cc.mov(scissorPtr, x86::qword_ptr(x86::rsp, StackOffset + 40));
+		cc.mov(modelToClipMatrixPtr, x86::qword_ptr(x86::rsp, StackOffset));
+		cc.mov(bfWinding, x86::qword_ptr(x86::rsp, StackOffset + 8));
+		cc.mov(clipPlaneMask, x86::qword_ptr(x86::rsp, StackOffset + 16));
+		cc.mov(vtxLayoutPtr, x86::qword_ptr(x86::rsp, StackOffset + 24));
 
-		ASM_RasterizeTriangleBatch(cc, ra, 0, msocPtr, ipVtxXPtr, ipVtxYPtr, pVtxXPtr, pVtxYPtr, pVtxZPtr, pVtxUPtr, pVtxVPtr, triMask, scissorPtr);
+		ASM_RasterizerContext context(cc, ra);
+		ra.InitializeStack();
+
+		//////////////////////////////////////////////////////////////////////////////
+		// Set up run-time constants
+		//////////////////////////////////////////////////////////////////////////////
+
+		{
+			// Set up msoc object pointer
+			cc.mov(context.i64_msoc_ptr, msocPtr);
+
+			// Set up i_res_tiles_width
+			X86Gp i64_tiles_width = ra.newI64("i64_tiles_width");
+			X86Gp i64_scanline_step = ra.newI64("i64_scanline_step");
+			cc.xor_(i64_tiles_width, i64_tiles_width);
+			cc.mov(i64_tiles_width.r32(), x86::dword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mTilesWidth)));
+			cc.mov(i64_scanline_step, i64_tiles_width);
+			cc.imul(i64_scanline_step, sizeof(ZTile));
+			ra.free(i64_scanline_step);
+			cc.mov(context.i64_scanline_step, i64_scanline_step);
+
+			// Set up buffer pointer
+			X86Gp i64_msoc_buffer_ptr = ra.newI64("i64_msoc_buffer_ptr");
+			cc.mov(i64_msoc_buffer_ptr, x86::qword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mMaskedHiZBuffer)));
+			ra.free(i64_msoc_buffer_ptr);
+			cc.mov(context.i64_msoc_buffer_ptr, i64_msoc_buffer_ptr);
+
+			// Set up simd_i_res_tiles_width
+			X86Ymm tmp = ra.newYmm("tmp");
+			ASM_set1(cc, tmp, i64_tiles_width.r32());
+			ra.free(i64_tiles_width);
+			cc.vmovdqa(context.simd_i_res_tiles_width, tmp);
+
+			// Set up C_horizontalSlopeDelta and C_negHorizontalSlopeDelta
+			X86Gp i32_width = ra.newI32("i32_width");
+			ra.free(msocPtr);
+			cc.mov(i32_width, x86::dword_ptr(msocPtr, offsetof(MaskedOcclusionCullingPrivate, mWidth)));
+			ASM_set1(cc, tmp, i32_width);
+			ra.free(i32_width);
+			cc.vcvtdq2ps(tmp, tmp);
+			cc.vaddps(tmp, tmp, context.simd_f_guardband);
+			cc.vmovdqa(context.simd_f_horizontal_slope_delta, tmp);
+			cc.vxorps(tmp, tmp, context.simd_f_neg_0);
+			ra.free(tmp);
+			cc.vmovdqa(context.simd_f_neg_horizontal_slope_delta, tmp);
+
+			// Move low frequency parameters to memory to free up registers
+			cc.mov(context.Mem_inVtxPtr, inVtxPtr);
+			cc.mov(context.Mem_inTrisPtr, inTrisPtr);
+			cc.mov(context.Mem_nTris, nTris);
+			cc.mov(context.Mem_modelToClipMatrixPtr, modelToClipMatrixPtr);
+			cc.mov(context.Mem_bfWinding, bfWinding);
+			cc.mov(context.Mem_clipPlaneMask, clipPlaneMask);
+			cc.mov(context.Mem_vtxLayoutPtr, vtxLayoutPtr);
+		}
+
+
+		ra.free(msocPtr);
+		ra.free(inVtxPtr);
+		ra.free(inTrisPtr);
+		ra.free(nTris);
+		ra.free(modelToClipMatrixPtr);
+		ra.free(bfWinding);
+		ra.free(clipPlaneMask);
+		ra.free(vtxLayoutPtr);
+
+		ASM_RenderTriangles(cc, ra, context, 0, 0);
+
+		ra.CleanupStack();
+
+		//ASM_RasterizeTriangleBatch(cc, ra, 0, msocPtr, ipVtxXPtr, ipVtxYPtr, pVtxXPtr, pVtxYPtr, pVtxZPtr, pVtxUPtr, pVtxVPtr, triMask, scissorPtr);
 
 		for (int i = 6; i < 16; ++i)
 			cc.vmovaps(x86::dqword_ptr(x86::rsp, (15 - i) * sizeof(__m128)), x86OpData.xmm[i]);
@@ -2825,7 +3371,7 @@ public:
 
 		cc.finalize();
 
-		mRuntime.add(&mASMRasterizeTriangleBatch, &code);
+		mRuntime.add(&mASMRenderTriangles, &code);
 		fclose(f);
 	}
 
@@ -4565,12 +5111,11 @@ public:
 #if PRECISE_COVERAGE != 0
 			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(ipVtxX, ipVtxY, pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, texture);
 #else
-#define USE_ASM
-#ifdef USE_ASM
-			mASMRasterizeTriangleBatch(this, nullptr, nullptr, pVtxX, pVtxY, pVtxZ, nullptr, nullptr, triMask, &mFullscreenScissor);
-#else
+//#ifdef USE_ASM
+//			mASMRasterizeTriangleBatch(this, nullptr, nullptr, pVtxX, pVtxY, pVtxZ, nullptr, nullptr, triMask, &mFullscreenScissor);
+//#else
 			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, texture);
-#endif
+//#endif
 #endif
 
 			if (TEST_Z && cullResult == CullingResult::VISIBLE) {
@@ -4589,7 +5134,12 @@ public:
 
 	CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
 	{
+#define USE_ASM
+#ifdef USE_ASM
+		return (CullingResult)mASMRenderTriangles(this, inVtx, inTris, nTris, modelToClipMatrix, bfWinding, clipPlaneMask, &vtxLayout);
+#else
 		return (CullingResult)RenderTriangles<0, 0>(inVtx, inTris, nTris, nullptr, modelToClipMatrix, bfWinding, clipPlaneMask, vtxLayout);
+#endif
 	}
 
 	CullingResult RenderTexturedTriangles(const float *inVtx, const unsigned int *inTris, int nTris, MaskedOcclusionTexture *texture, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout) override
