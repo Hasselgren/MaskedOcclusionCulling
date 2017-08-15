@@ -14,6 +14,16 @@
 // under the License.
 ////////////////////////////////////////////////////////////////////////////////
 
+#define FIXED_POINT_DEPTH 1
+
+#if FIXED_POINT_DEPTH != 0
+	typedef int DepthVal;
+	typedef __mwi SIMDDepthVal;
+#else
+	typedef float DepthVal;
+	typedef __mw SIMDDepthVal;
+#endif
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Common SIMD math utility functions
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -116,8 +126,8 @@ class MaskedOcclusionCullingPrivate : public MaskedOcclusionCulling
 public:
 	struct ZTile
 	{
-		__mw        mZMin[2];
-		__mwi       mMask;
+		SIMDDepthVal mZMin[2];
+		__mwi        mMask;
 	};
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -257,12 +267,24 @@ public:
 			mMaskedHiZBuffer[i].mMask = _mmw_setzero_epi32();
 
 			// Clear z0 to beyond infinity to ensure we never merge with clear data
+#if FIXED_POINT_DEPTH != 0
+			mMaskedHiZBuffer[i].mZMin[0] = _mmw_set1_epi32(-0x00FFFFFF);
+#else
 			mMaskedHiZBuffer[i].mZMin[0] = _mmw_set1_ps(-1.0f);
+#endif
 #if QUICK_MASK != 0
 			// Clear z1 to nearest depth value as it is pushed back on each update
+#if FIXED_POINT_DEPTH != 0
+			mMaskedHiZBuffer[i].mZMin[1] = _mmw_set1_epi32(0x00FFFFFF);
+#else
 			mMaskedHiZBuffer[i].mZMin[1] = _mmw_set1_ps(FLT_MAX);
+#endif
+#else
+#if FIXED_POINT_DEPTH != 0
+			mMaskedHiZBuffer[i].mZMin[0] = _mmw_setzero_epi32();
 #else
 			mMaskedHiZBuffer[i].mZMin[1] = _mmw_setzero_ps();
+#endif
 #endif
 		}
 
@@ -633,7 +655,49 @@ public:
 		zPixelDy = _mmw_mul_ps(_mmw_fmsub_ps(x1, z2, _mmw_mul_ps(z1, x2)), d);
 	}
 
-	FORCE_INLINE void UpdateTileQuick(int tileIdx, const __mwi &coverage, const __mw &zTriv)
+#if FIXED_POINT_DEPTH != 0
+	FORCE_INLINE void UpdateTileQuick(int tileIdx, const __mwi &coverage, const SIMDDepthVal &zTriv)
+	{
+		// Update heuristic used in the paper "Masked Software Occlusion Culling", 
+		// good balance between performance and accuracy
+		STATS_ADD(mStats.mOccluders.mNumTilesUpdated, 1);
+		assert(tileIdx >= 0 && tileIdx < mTilesWidth*mTilesHeight);
+
+		__mwi mask = mMaskedHiZBuffer[tileIdx].mMask;
+		__mwi *zMin = mMaskedHiZBuffer[tileIdx].mZMin;
+
+		// Swizzle coverage mask to 8x4 subtiles and test if any subtiles are not covered at all
+		__mwi rastMask = _mmw_transpose_epi8(coverage);
+		__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
+
+		// Mask out all subtiles failing the depth test (don't update these subtiles)
+		deadLane = _mmw_or_epi32(deadLane, _mmw_cmpgt_epi32(zMin[0], zTriv));
+		rastMask = _mmw_andnot_epi32(deadLane, rastMask);
+
+		// Use distance heuristic to discard layer 1 if incoming triangle is significantly nearer to observer
+		// than the buffer contents. See Section 3.2 in "Masked Software Occlusion Culling"
+		__mwi coveredLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ONE);
+		__mwi diff = _mmw_sub_epi32(_mmw_add_epi32(zMin[1], zMin[1]), _mmw_add_epi32(zTriv, zMin[0]));
+		__mwi discardLayerMask = _mmw_andnot_epi32(deadLane, _mmw_or_epi32(_mmw_srai_epi32(simd_cast<__mwi>(diff), 31), coveredLane));
+
+		// Update the mask with incoming triangle coverage
+		mask = _mmw_or_epi32(_mmw_andnot_epi32(discardLayerMask, mask), rastMask);
+
+		__mwi maskFull = _mmw_cmpeq_epi32(mask, SIMD_BITS_ONE);
+
+		// Compute new value for zMin[1]. This has one of four outcomes: zMin[1] = min(zMin[1], zTriv),  zMin[1] = zTriv, 
+		// zMin[1] = FLT_MAX or unchanged, depending on if the layer is updated, discarded, fully covered, or not updated
+		__mwi opA = _mmw_blendv_epi32(zTriv, zMin[1], deadLane);
+		__mwi opB = _mmw_blendv_epi32(zMin[1], zTriv, discardLayerMask);
+		__mwi z1min = _mmw_min_epi32(opA, opB);
+		zMin[1] = _mmw_blendv_epi32(z1min, _mmw_set1_epi32(0x7FFFFFFF), maskFull);
+
+		// Propagate zMin[1] back to zMin[0] if tile was fully covered, and update the mask
+		zMin[0] = _mmw_blendv_epi32(zMin[0], z1min, maskFull);
+		mMaskedHiZBuffer[tileIdx].mMask = _mmw_andnot_epi32(maskFull, mask);
+	}
+#else
+	FORCE_INLINE void UpdateTileQuick(int tileIdx, const __mwi &coverage, const SIMDDepthVal &zTriv)
 	{
 		// Update heuristic used in the paper "Masked Software Occlusion Culling", 
 		// good balance between performance and accuracy
@@ -674,7 +738,7 @@ public:
 		mMaskedHiZBuffer[tileIdx].mMask = _mmw_andnot_epi32(maskFull, mask);
 	}
 
-	FORCE_INLINE void UpdateTileAccurate(int tileIdx, const __mwi &coverage, const __mw &zTriv)
+	FORCE_INLINE void UpdateTileAccurate(int tileIdx, const __mwi &coverage, const SIMDDepthVal &zTriv)
 	{
 		assert(tileIdx >= 0 && tileIdx < mTilesWidth*mTilesHeight);
 
@@ -747,9 +811,10 @@ public:
 		__mw z1t = _mmw_blendv_ps(zTri, z1, simd_cast<__mw>(d0min));
 		zMin[1] = _mmw_blendv_ps(z1t, z0, simd_cast<__mw>(d1min));
 	}
+#endif
 
 	template<int TEST_Z, int NRIGHT, int NLEFT>
-	FORCE_INLINE int TraverseScanline(int leftOffset, int rightOffset, int tileIdx, int rightEvent, int leftEvent, const __mwi *events, const __mw &zTriMin, const __mw &zTriMax, const __mw &iz0, float zx)
+	FORCE_INLINE int TraverseScanline(int leftOffset, int rightOffset, int tileIdx, int rightEvent, int leftEvent, const __mwi *events, const SIMDDepthVal &zTriMin, const SIMDDepthVal &zTriMax, const SIMDDepthVal &iz0, DepthVal zx)
 	{
 		// Floor edge events to integer pixel coordinates (shift out fixed point bits)
 		int eventOffset = leftOffset << TILE_WIDTH_SHIFT;
@@ -759,7 +824,11 @@ public:
 		for (int i = 0; i < NLEFT; ++i)
 			left[i] = _mmw_max_epi32(_mmw_sub_epi32(_mmw_srai_epi32(events[leftEvent - i], FP_BITS), _mmw_set1_epi32(eventOffset)), SIMD_BITS_ZERO);
 
+#if FIXED_POINT_DEPTH != 0
+		SIMDDepthVal z0 = _mmw_add_epi32(iz0, _mmw_set1_epi32(zx*leftOffset));
+#else
 		__mw z0 = _mmw_add_ps(iz0, _mmw_set1_ps(zx*leftOffset));
+#endif
 		int tileIdxEnd = tileIdx + rightOffset;
 		tileIdx += leftOffset;
 		for (;;)
@@ -772,7 +841,7 @@ public:
 			// Perform a coarse test to quickly discard occluded tiles
 #if QUICK_MASK != 0
 			// Only use the reference layer (layer 0) to cull as it is always conservative
-			__mw zMinBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
+			SIMDDepthVal zMinBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
 #else
 			// Compute zMin for the overlapped layers 
 			__mwi mask = mMaskedHiZBuffer[tileIdx].mMask;
@@ -780,7 +849,11 @@ public:
 			__mw zMin1 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[1], mMaskedHiZBuffer[tileIdx].mZMin[0], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_setzero_epi32())));
 			__mw zMinBuf = _mmw_min_ps(zMin0, zMin1);
 #endif
+#if FIXED_POINT_DEPTH != 0
+			__mw dist0 = simd_cast<__mw>(_mmw_sub_epi32(zTriMax, zMinBuf));
+#else
 			__mw dist0 = _mmw_sub_ps(zTriMax, zMinBuf);
+#endif
 			if (_mmw_movemask_ps(dist0) != SIMD_ALL_LANES_MASK)
 			{
 				// Compute coverage mask for entire 32xN using shift operations
@@ -793,8 +866,13 @@ public:
 				if (TEST_Z)
 				{
 					// Perform a conservative visibility test (test zMax against buffer for each covered 8x4 subtile)
-					__mw zSubTileMax = _mmw_min_ps(z0, zTriMax);
+#if FIXED_POINT_DEPTH != 0
+					SIMDDepthVal zSubTileMax = _mmw_min_epi32(z0, zTriMax);
+					__mwi zPass = _mmw_cmpgt_epi32(zSubTileMax, zMinBuf);
+#else
+					SIMDDepthVal zSubTileMax = _mmw_min_ps(z0, zTriMax);
 					__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zSubTileMax, zMinBuf));
+#endif
 
 					__mwi rastMask = _mmw_transpose_epi8(accumulatedMask);
 					__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
@@ -806,7 +884,11 @@ public:
 				else
 				{
 					// Compute interpolated min for each 8x4 subtile and update the masked hierarchical z buffer entry
-					__mw zSubTileMin = _mmw_max_ps(z0, zTriMin);
+#if FIXED_POINT_DEPTH != 0
+					SIMDDepthVal zSubTileMin = _mmw_max_epi32(z0, zTriMin);
+#else
+					SIMDDepthVal zSubTileMin = _mmw_max_ps(z0, zTriMin);
+#endif
 #if QUICK_MASK != 0
 					UpdateTileQuick(tileIdx, accumulatedMask, zSubTileMin);
 #else 
@@ -819,7 +901,11 @@ public:
 			tileIdx++;
 			if (tileIdx >= tileIdxEnd)
 				break;
+#if FIXED_POINT_DEPTH != 0
+			z0 = _mmw_add_epi32(z0, _mmw_set1_epi32(zx));
+#else
 			z0 = _mmw_add_ps(z0, _mmw_set1_ps(zx));
+#endif
 			for (int i = 0; i < NRIGHT; ++i)
 				right[i] = _mmw_subs_epu16(right[i], SIMD_TILE_WIDTH);	// Trick, use sub saturated to avoid checking against < 0 for shift (values should fit in 16 bits)
 			for (int i = 0; i < NLEFT; ++i)
@@ -832,9 +918,9 @@ public:
 
 	template<int TEST_Z, int TIGHT_TRAVERSAL, int MID_VTX_RIGHT>
 #if PRECISE_COVERAGE != 0
-	FORCE_INLINE int RasterizeTriangle(unsigned int triIdx, int bbWidth, int tileRowIdx, int tileMidRowIdx, int tileEndRowIdx, const __mwi *eventStart, const __mw *slope, const __mwi *slopeTileDelta, const __mw &zTriMin, const __mw &zTriMax, __mw &z0, float zx, float zy, const __mwi *edgeY, const __mwi *absEdgeX, const __mwi *slopeSign, const __mwi *eventStartRemainder, const __mwi *slopeTileRemainder)
+	FORCE_INLINE int RasterizeTriangle(unsigned int triIdx, int bbWidth, int tileRowIdx, int tileMidRowIdx, int tileEndRowIdx, const __mwi *eventStart, const __mw *slope, const __mwi *slopeTileDelta, const SIMDDepthVal &zTriMin, const SIMDDepthVal &zTriMax, SIMDDepthVal &z0, DepthVal zx, DepthVal zy, const __mwi *edgeY, const __mwi *absEdgeX, const __mwi *slopeSign, const __mwi *eventStartRemainder, const __mwi *slopeTileRemainder)
 #else
-	FORCE_INLINE int RasterizeTriangle(unsigned int triIdx, int bbWidth, int tileRowIdx, int tileMidRowIdx, int tileEndRowIdx, const __mwi *eventStart, const __mwi *slope, const __mwi *slopeTileDelta, const __mw &zTriMin, const __mw &zTriMax, __mw &z0, float zx, float zy)
+	FORCE_INLINE int RasterizeTriangle(unsigned int triIdx, int bbWidth, int tileRowIdx, int tileMidRowIdx, int tileEndRowIdx, const __mwi *eventStart, const __mwi *slope, const __mwi *slopeTileDelta, const SIMDDepthVal &zTriMin, const SIMDDepthVal &zTriMax, SIMDDepthVal &z0, DepthVal zx, DepthVal zy)
 #endif
 	{
 		if (TEST_Z)
@@ -934,7 +1020,11 @@ public:
 
 				// move to the next scanline of tiles, update edge events and interpolate z
 				tileRowIdx += mTilesWidth;
+#if FIXED_POINT_DEPTH != 0
+				z0 = _mmw_add_epi32(z0, _mmw_set1_epi32(zy));
+#else
 				z0 = _mmw_add_ps(z0, _mmw_set1_ps(zy));
+#endif
 				UPDATE_TILE_EVENTS_Y(0);
 				UPDATE_TILE_EVENTS_Y(2);
 			}
@@ -974,7 +1064,11 @@ public:
 			if (tileRowIdx < tileEndRowIdx)
 			{
 				// move to the next scanline of tiles, update edge events and interpolate z
+#if FIXED_POINT_DEPTH != 0
+				z0 = _mmw_add_epi32(z0, _mmw_set1_epi32(zy));
+#else
 				z0 = _mmw_add_ps(z0, _mmw_set1_ps(zy));
+#endif
 				int i0 = MID_VTX_RIGHT + 0;
 				int i1 = MID_VTX_RIGHT + 1;
 				UPDATE_TILE_EVENTS_Y(i0);
@@ -1001,7 +1095,11 @@ public:
 					tileRowIdx += mTilesWidth;
 					if (tileRowIdx >= tileEndRowIdx)
 						break;
+#if FIXED_POINT_DEPTH != 0
+					z0 = _mmw_add_epi32(z0, _mmw_set1_epi32(zy));
+#else
 					z0 = _mmw_add_ps(z0, _mmw_set1_ps(zy));
+#endif
 					UPDATE_TILE_EVENTS_Y(i0);
 					UPDATE_TILE_EVENTS_Y(i1);
 				}
@@ -1045,7 +1143,11 @@ public:
 					tileRowIdx += mTilesWidth;
 					if (tileRowIdx >= tileEndRowIdx)
 						break;
+#if FIXED_POINT_DEPTH != 0
+					z0 = _mmw_add_epi32(z0, _mmw_set1_epi32(zy));
+#else
 					z0 = _mmw_add_ps(z0, _mmw_set1_ps(zy));
+#endif
 					UPDATE_TILE_EVENTS_Y(i0);
 					UPDATE_TILE_EVENTS_Y(i1);
 				}
@@ -1092,29 +1194,48 @@ public:
 		// Set up screen space depth plane
 		//////////////////////////////////////////////////////////////////////////////
 
-		__mw zPixelDx, zPixelDy;
-		ComputeDepthPlane(pVtxX, pVtxY, pVtxZ, zPixelDx, zPixelDy);
-
 		// Compute z value at min corner of bounding box. Offset to make sure z is conservative for all 8x4 subtiles
 		__mw bbMinXV0 = _mmw_sub_ps(_mmw_cvtepi32_ps(bbPixelMinX), pVtxX[0]);
 		__mw bbMinYV0 = _mmw_sub_ps(_mmw_cvtepi32_ps(bbPixelMinY), pVtxY[0]);
-		__mw zPlaneOffset = _mmw_fmadd_ps(zPixelDx, bbMinXV0, _mmw_fmadd_ps(zPixelDy, bbMinYV0, pVtxZ[0]));
-		__mw zTileDx = _mmw_mul_ps(zPixelDx, _mmw_set1_ps((float)TILE_WIDTH));
-		__mw zTileDy = _mmw_mul_ps(zPixelDy, _mmw_set1_ps((float)TILE_HEIGHT));
+
+		__mw zPixelDxf, zPixelDyf;
+		ComputeDepthPlane(pVtxX, pVtxY, pVtxZ, zPixelDxf, zPixelDyf);
+
+		__mw zTileDxf = _mmw_mul_ps(zPixelDxf, _mmw_set1_ps((float)TILE_WIDTH));
+		__mw zTileDyf = _mmw_mul_ps(zPixelDyf, _mmw_set1_ps((float)TILE_HEIGHT));
+		__mw zPlaneOffsetf = _mmw_fmadd_ps(zPixelDxf, bbMinXV0, _mmw_fmadd_ps(zPixelDyf, bbMinYV0, pVtxZ[0]));
 		if (TEST_Z)
 		{
-			zPlaneOffset = _mmw_add_ps(zPlaneOffset, _mmw_max_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDx, _mmw_set1_ps(SUB_TILE_WIDTH))));
-			zPlaneOffset = _mmw_add_ps(zPlaneOffset, _mmw_max_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDy, _mmw_set1_ps(SUB_TILE_HEIGHT))));
+			zPlaneOffsetf = _mmw_add_ps(zPlaneOffsetf, _mmw_max_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDxf, _mmw_set1_ps(SUB_TILE_WIDTH))));
+			zPlaneOffsetf = _mmw_add_ps(zPlaneOffsetf, _mmw_max_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDyf, _mmw_set1_ps(SUB_TILE_HEIGHT))));
 		}
 		else
 		{
-			zPlaneOffset = _mmw_add_ps(zPlaneOffset, _mmw_min_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDx, _mmw_set1_ps(SUB_TILE_WIDTH))));
-			zPlaneOffset = _mmw_add_ps(zPlaneOffset, _mmw_min_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDy, _mmw_set1_ps(SUB_TILE_HEIGHT))));
+			zPlaneOffsetf = _mmw_add_ps(zPlaneOffsetf, _mmw_min_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDxf, _mmw_set1_ps(SUB_TILE_WIDTH))));
+			zPlaneOffsetf = _mmw_add_ps(zPlaneOffsetf, _mmw_min_ps(_mmw_setzero_ps(), _mmw_mul_ps(zPixelDyf, _mmw_set1_ps(SUB_TILE_HEIGHT))));
 		}
 
 		// Compute Zmin and Zmax for the triangle (used to narrow the range for difficult tiles)
-		__mw zMin = _mmw_min_ps(pVtxZ[0], _mmw_min_ps(pVtxZ[1], pVtxZ[2]));
-		__mw zMax = _mmw_max_ps(pVtxZ[0], _mmw_max_ps(pVtxZ[1], pVtxZ[2]));
+		__mw zMinf = _mmw_min_ps(pVtxZ[0], _mmw_min_ps(pVtxZ[1], pVtxZ[2]));
+		__mw zMaxf = _mmw_max_ps(pVtxZ[0], _mmw_max_ps(pVtxZ[1], pVtxZ[2]));
+
+#if FIXED_POINT_DEPTH != 0
+		SIMDDepthVal zPixelDx = _mmw_cvtps_epi32(_mmw_mul_ps(zPixelDxf, _mmw_set1_ps((float)0x00FFFFFF)));
+		SIMDDepthVal zPixelDy = _mmw_cvtps_epi32(_mmw_mul_ps(zPixelDyf, _mmw_set1_ps((float)0x00FFFFFF)));
+		SIMDDepthVal zTileDx = _mmw_cvtps_epi32(_mmw_mul_ps(zTileDxf, _mmw_set1_ps((float)0x00FFFFFF)));
+		SIMDDepthVal zTileDy = _mmw_cvtps_epi32(_mmw_mul_ps(zTileDyf, _mmw_set1_ps((float)0x00FFFFFF)));
+		SIMDDepthVal zPlaneOffset = _mmw_cvtps_epi32(_mmw_mul_ps(zPlaneOffsetf, _mmw_set1_ps((float)0x00FFFFFF)));
+		SIMDDepthVal zMin = _mmw_cvtps_epi32(_mmw_mul_ps(zMinf, _mmw_set1_ps((float)0x00FFFFFF)));
+		SIMDDepthVal zMax = _mmw_cvtps_epi32(_mmw_mul_ps(zMaxf, _mmw_set1_ps((float)0x00FFFFFF)));
+#else
+		SIMDDepthVal zPixelDx = zPixelDxf;
+		SIMDDepthVal zPixelDy = zPixelDyf;
+		SIMDDepthVal zTileDx = zTileDxf;
+		SIMDDepthVal zTileDy = zTileDyf;
+		SIMDDepthVal zPlaneOffset = zPlaneOffsetf;
+		SIMDDepthVal zMin = zMinf;
+		SIMDDepthVal zMax = zMaxf;
+#endif
 
 		//////////////////////////////////////////////////////////////////////////////
 		// Sort vertices (v0 has lowest Y, and the rest is in winding order) and
@@ -1288,15 +1409,27 @@ public:
 			int triMidVtxRight = (midVtxRight >> triIdx) & 1;
 
 			// Get Triangle Zmin zMax
-			__mw zTriMax = _mmw_set1_ps(simd_f32(zMax)[triIdx]);
-			__mw zTriMin = _mmw_set1_ps(simd_f32(zMin)[triIdx]);
+#if FIXED_POINT_DEPTH != 0
+			SIMDDepthVal zTriMax = _mmw_set1_epi32(simd_i32(zMax)[triIdx]);
+			SIMDDepthVal zTriMin = _mmw_set1_epi32(simd_i32(zMin)[triIdx]);
 
 			// Setup Zmin value for first set of 8x4 subtiles
-			__mw z0 = _mmw_fmadd_ps(_mmw_set1_ps(simd_f32(zPixelDx)[triIdx]), SIMD_SUB_TILE_COL_OFFSET_F,
-				_mmw_fmadd_ps(_mmw_set1_ps(simd_f32(zPixelDy)[triIdx]), SIMD_SUB_TILE_ROW_OFFSET_F, _mmw_set1_ps(simd_f32(zPlaneOffset)[triIdx])));
-			float zx = simd_f32(zTileDx)[triIdx];
-			float zy = simd_f32(zTileDy)[triIdx];
+			SIMDDepthVal z0 = _mmw_mullo_epi32(_mmw_set1_epi32(simd_i32(zPixelDx)[triIdx]), SIMD_SUB_TILE_COL_OFFSET);
+			z0 = _mmw_add_epi32(_mmw_mullo_epi32(_mmw_set1_epi32(simd_i32(zPixelDy)[triIdx]), SIMD_SUB_TILE_ROW_OFFSET), z0);
+			z0 = _mmw_add_epi32(_mmw_set1_epi32(simd_i32(zPlaneOffset)[triIdx]), z0);
 
+			DepthVal zx = simd_i32(zTileDx)[triIdx];
+			DepthVal zy = simd_i32(zTileDy)[triIdx];
+#else
+			SIMDDepthVal zTriMax = _mmw_set1_ps(simd_f32(zMax)[triIdx]);
+			SIMDDepthVal zTriMin = _mmw_set1_ps(simd_f32(zMin)[triIdx]);
+
+			// Setup Zmin value for first set of 8x4 subtiles
+			SIMDDepthVal z0 = _mmw_fmadd_ps(_mmw_set1_ps(simd_f32(zPixelDx)[triIdx]), SIMD_SUB_TILE_COL_OFFSET_F,
+				_mmw_fmadd_ps(_mmw_set1_ps(simd_f32(zPixelDy)[triIdx]), SIMD_SUB_TILE_ROW_OFFSET_F, _mmw_set1_ps(simd_f32(zPlaneOffset)[triIdx])));
+			DepthVal zx = simd_f32(zTileDx)[triIdx];
+			DepthVal zy = simd_f32(zTileDy)[triIdx];
+#endif
 			// Get dimension of bounding box bottom, mid & top segments
 			int bbWidth = simd_i32(bbTileSizeX)[triIdx];
 			int bbHeight = simd_i32(bbTileSizeY)[triIdx];
@@ -1555,7 +1688,12 @@ public:
 		// Compute z from w. Note that z is reversed order, 0 = far, 1 = near, which
 		// means we use a greater than test, so zMax is used to test for visibility.
 		//////////////////////////////////////////////////////////////////////////////
-		__mw zMax = _mmw_div_ps(_mmw_set1_ps(1.0f), _mmw_set1_ps(wmin));
+#if FIXED_POINT_DEPTH != 0
+		__mw zMaxf = _mmw_div_ps(_mmw_set1_ps(1.0f), _mmw_set1_ps(wmin));
+		SIMDDepthVal zMax = _mmw_cvtps_epi32(_mmw_mul_ps(zMaxf, _mmw_set1_ps((float)0x00FFFFFF)));
+#else
+		SIMDDepthVal zMax = _mmw_div_ps(_mmw_set1_ps(1.0f), _mmw_set1_ps(wmin));
+#endif
 
 		for (;;)
 		{
@@ -1569,7 +1707,7 @@ public:
 
 				// Fetch zMin from masked hierarchical Z buffer
 #if QUICK_MASK != 0
-				__mw zBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
+				SIMDDepthVal zBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
 #else
 				__mwi mask = mMaskedHiZBuffer[tileIdx].mMask;
 				__mw zMin0 = _mmw_blendv_ps(mMaskedHiZBuffer[tileIdx].mZMin[0], mMaskedHiZBuffer[tileIdx].mZMin[1], simd_cast<__mw>(_mmw_cmpeq_epi32(mask, _mmw_set1_epi32(~0))));
@@ -1577,7 +1715,11 @@ public:
 				__mw zBuf = _mmw_min_ps(zMin0, zMin1);
 #endif
 				// Perform conservative greater than test against hierarchical Z buffer (zMax >= zBuf means the subtile is visible)
-				__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zMax, zBuf));	//zPass = zMax >= zBuf ? ~0 : 0
+#if FIXED_POINT_DEPTH != 0
+				__mwi zPass = _mmw_cmpgt_epi32(zMax, zBuf); //zPass = zMax >= zBuf ? ~0 : 0
+#else
+				__mwi zPass = simd_cast<__mwi>(_mmw_cmpge_ps(zMax, zBuf)); //zPass = zMax >= zBuf ? ~0 : 0
+#endif
 
 				// Mask out lanes corresponding to subtiles outside the bounding box
 				__mwi bboxTestMin = _mmw_and_epi32(_mmw_cmpgt_epi32(pixelX, stxmin), _mmw_cmpgt_epi32(pixelY, stymin));
@@ -1872,7 +2014,11 @@ public:
 				int bitIdx = py * 8 + px;
 
 				int pixelLayer = (simd_i32(mMaskedHiZBuffer[tileIdx].mMask)[subTileIdx] >> bitIdx) & 1;
+#if FIXED_POINT_DEPTH != 0
+				float pixelDepth = simd_i32(mMaskedHiZBuffer[tileIdx].mZMin[pixelLayer])[subTileIdx] / (float)0x00FFFFFF;
+#else
 				float pixelDepth = simd_f32(mMaskedHiZBuffer[tileIdx].mZMin[pixelLayer])[subTileIdx];
+#endif
 
 				depthData[y * mWidth + x] = pixelDepth;
 			}
