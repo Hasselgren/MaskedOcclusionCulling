@@ -739,26 +739,24 @@ public:
 		X86Mem zMinPtr[2] = { x86::yword_ptr(tileAddr, offsetof(ZTile, mZMin[0])), x86::yword_ptr(tileAddr, offsetof(ZTile, mZMin[1])) };
 		X86Mem zMaskPtr = x86::yword_ptr(tileAddr, offsetof(ZTile, mMask));
 
-		X86Ymm zMin0 = ra.newYmm("zMin0");
+		X86Ymm zMin0 = ra.newYmm("zMin0"), zMin1 = ra.newYmm("zMin1");
 		cc.vmovaps(zMin0, zMinPtr[0]);
-		X86Ymm zMin1 = ra.newYmm("zMin1");
 		cc.vmovaps(zMin1, zMinPtr[1]);
 
 		// Mask out all subtiles failing the depth test (don't update these subtiles)
-		X86Ymm sub_t_0_sign = ra.newYmm("sub_t_0_sign");
+		X86Ymm sub_t_0_sign = ra.newYmm("sub_t_0_sign"), deadLane = ra.newYmm("deadLane"), maskedCoverage = ra.newYmm("maskedCoverage");
+
 		cc.vsubps(sub_t_0_sign, zTri, zMin0);                                      // sub_t_0_sign = zTri - tile.zMin[0]
 		cc.vpsrad(sub_t_0_sign, sub_t_0_sign, 31);                                 // sub_t_0_sign >>= 31;
-		X86Ymm deadLane = ra.newYmm("deadLane");
 		cc.vpcmpeqd(deadLane, coverage, context.simd_i_0);                         // deadLane = coverage == 0 ? ~0 : 0
 		cc.vpor(deadLane, deadLane, sub_t_0_sign);                                 // deadlane |= sub_t_0_sign
-		X86Ymm maskedCoverage = ra.newYmm("maskedCoverage");
 		cc.vpandn(maskedCoverage, sub_t_0_sign, coverage);                         // maskedCoverage = ~sub_t_0_sign & coverage
 		ra.free(sub_t_0_sign);
 		ra.free(coverage);
 
 		// Use distance heuristic to discard layer 1 if incoming triangle is significantly nearer to observer
 		// than the buffer contents. See Section 3.2 in "Masked Software Occlusion Culling"
-		X86Ymm &diff_t_0_1 = ra.newYmm("diff_t_0_1");
+		X86Ymm diff_t_0_1 = ra.newYmm("diff_t_0_1");
 		cc.vaddps(diff_t_0_1, zTri, zMin0);                                        // diff_t_0_1 = zTri + tile.zMin[0]
 		X86Ymm fullyCoveredLane = ra.newYmm("fullyCoveredLane");
 		cc.vpcmpeqd(fullyCoveredLane, maskedCoverage, context.simd_i_not_0);       // maskedCoverage == ~0
@@ -2754,7 +2752,7 @@ public:
 						ra.free(tmpY);
 						ra.free(tmpW);
 					}
-					
+
 					// Write the remaining triangles into the clip buffer and process them next loop iteration
 					X86Gp loopCntr = ra.newI32("loopCntr");
 					X86Xmm vtx[3] = { ra.newXmm("vtx", 0), ra.newXmm("vtx", 1), ra.newXmm("vtx", 2) };
@@ -2766,17 +2764,19 @@ public:
 					cc.cmp(loopCntr, nClippedVerts);                                                                      // for (int loopCntr = 2; loopcntr < nClippedVerts-1; loopCntr++)
 					cc.jge(L_clipLoopStart); // Jump straight back to main loop
 					{
-						cc.vmovaps(vtx[1], x86::dqword_ptr(srcBufPtr, loopCntr, 0, 0));                                   // vtx[1] = srcBufPtr[loopCntr]
-						cc.vmovaps(vtx[2], x86::dqword_ptr(srcBufPtr, loopCntr, 0, sizeof(__m128)));                      // vtx[2] = srcBufPtr[loopCntr + 1]
 						X86Gp clipWriteAddr = ra.newI64("clipWriteAddr");
 						cc.lea(clipWriteAddr, x86::dword_ptr(clipWriteIdx, clipWriteIdx, 1, 0));                          // clipWriteAddr = clipWriteIdx * 3
+						cc.shl(clipWriteAddr, 4);                                                                         // clipWriteAddr *= sizeof(__m128)
+						cc.vmovaps(vtx[1], x86::dqword_ptr(srcBufPtr, loopCntr, 0, 0));                                   // vtx[1] = srcBufPtr[loopCntr]
+						cc.vmovaps(vtx[2], x86::dqword_ptr(srcBufPtr, loopCntr, 0, sizeof(__m128)));                      // vtx[2] = srcBufPtr[loopCntr + 1]
 						cc.vmovaps(ASM_MemAdjust(context.Mem_clipVtxBuffer, clipWriteAddr, 0, sizeof(__m128) * 0), vtx[0]); // clipVtxBuffer[clipWriteAddr + 0] = vtx[0]
 						cc.vmovaps(ASM_MemAdjust(context.Mem_clipVtxBuffer, clipWriteAddr, 0, sizeof(__m128) * 1), vtx[1]); // clipVtxBuffer[clipWriteAddr + 1] = vtx[1]
 						cc.vmovaps(ASM_MemAdjust(context.Mem_clipVtxBuffer, clipWriteAddr, 0, sizeof(__m128) * 2), vtx[2]); // clipVtxBuffer[clipWriteAddr + 2] = vtx[2]
 						ra.free(clipWriteAddr);
 						cc.inc(clipWriteIdx);                                                                             // clipWriteIdx++
 						cc.and_(clipWriteIdx, MAX_CLIPPED - 1);                                                           // clipWriteIdx &= MAX_CLIPPED - 1
-						cc.add(loopCntr, sizeof(__m128));
+						cc.add(loopCntr, sizeof(__m128));                                                                 // loopCntr += sizeof(__m128)
+						cc.jmp(L_writeoutLoopStart);
 					}
 					ra.free(vtx[0]);
 					ra.free(vtx[1]);
@@ -2922,7 +2922,6 @@ public:
 			cc.je(L_FetchNoClip);
 			cc.bind(L_FetchClip);                                                    // if (clipHead != clipTail)
 			{
-				cc.int3();
 				/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 				// "Got unprocessed clipped triangles" branch: Fetch vertices from clip buffer, and pad with vertices to fill out SIMD width
 				/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2964,8 +2963,6 @@ public:
 				}
 				cc.bind(L_SkipGather);
 
-				cc.int3();
-
 				// Pad with clipped triangles
 				X86Gp clipTri = ra.newI32("clipTri"), totalLanes = ra.getI32(x86::ecx, "totalLanes");
 				cc.mov(clipTri, ncTris);                                              // clipTri = ncTris
@@ -3004,7 +3001,7 @@ public:
 				ra.free(clippedTris);
 
 				cc.sub(context.Mem_nTris, ncTris);                                    // nTris -= ncTris
-				X86Gp ptrOffset = cc.newI32("ptrOffset");
+				X86Gp ptrOffset = ra.newI32("ptrOffset");
 				cc.lea(ptrOffset, X86Mem(ncTris, ncTris, 1, 0));                      // ptrOffset = ncTris * 3
 				cc.shl(ptrOffset, 2);                                                 // ptrOffset *= sizeof(int)
 				cc.add(context.Mem_inTrisPtr, ptrOffset);                             // inTrisPtr += ptrOffset
@@ -3021,8 +3018,6 @@ public:
 				cc.shl(triClipMask, totalLanes);
 				cc.dec(triClipMask);                                                  // triClipMask = (1U << ncTris) - 1
 				ra.free(totalLanes);
-
-				cc.int3();
 
 				cc.jmp(L_FetchExit);
 			}
@@ -5111,11 +5106,7 @@ public:
 #if PRECISE_COVERAGE != 0
 			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(ipVtxX, ipVtxY, pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, texture);
 #else
-//#ifdef USE_ASM
-//			mASMRasterizeTriangleBatch(this, nullptr, nullptr, pVtxX, pVtxY, pVtxZ, nullptr, nullptr, triMask, &mFullscreenScissor);
-//#else
 			cullResult &= RasterizeTriangleBatch<TEST_Z, TEXTURE_COORDINATES>(pVtxX, pVtxY, pVtxZ, pVtxU, pVtxV, triMask, &mFullscreenScissor, texture);
-//#endif
 #endif
 
 			if (TEST_Z && cullResult == CullingResult::VISIBLE) {
